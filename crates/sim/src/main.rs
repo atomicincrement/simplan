@@ -370,8 +370,8 @@ fn mouse_controls(
     keys: Res<ButtonInput<KeyCode>>,
     mut app_exit: EventWriter<AppExit>,
 ) {
-    const ELEV_SENS: f64 = 0.003;
-    const AIL_SENS: f64 = 0.003;
+    const ELEV_SENS: f64 = 0.08;  // rad per pixel/s (scaled by delta pixels)
+    const AIL_SENS: f64 = 0.08;
     const MAX_DEF: f64 = 0.436; // ≈ 25°
     const THROTTLE_STEP: f64 = 0.05;
 
@@ -386,14 +386,19 @@ fn mouse_controls(
             (controls.throttle + ev.y as f64 * THROTTLE_STEP).clamp(0.0, 1.0);
     }
 
-    // Mouse axes control elevator and aileron.
+    // Sum all mouse deltas this frame; the aggregate pixel velocity maps
+    // directly to stick deflection.  When the mouse is stationary the
+    // controls spring back to zero (no accumulation).
+    let mut dx = 0.0_f32;
+    let mut dy = 0.0_f32;
     for ev in mouse_motion.read() {
-        // Invert Y so pulling mouse back raises the nose.
-        controls.elevator =
-            (controls.elevator - ev.delta.y as f64 * ELEV_SENS).clamp(-MAX_DEF, MAX_DEF);
-        controls.aileron =
-            (controls.aileron + ev.delta.x as f64 * AIL_SENS).clamp(-MAX_DEF, MAX_DEF);
+        dx += ev.delta.x;
+        dy += ev.delta.y;
     }
+
+    // Invert Y so pulling the mouse toward you raises the nose.
+    controls.elevator = (-dy as f64 * ELEV_SENS).clamp(-MAX_DEF, MAX_DEF);
+    controls.aileron  = ( dx as f64 * AIL_SENS ).clamp(-MAX_DEF, MAX_DEF);
 }
 
 // ── HUD ──────────────────────────────────────────────────────────────────────
