@@ -1,5 +1,5 @@
 use avian3d::prelude::*;
-use bevy::input::mouse::{MouseMotion, MouseWheel};
+use bevy::input::mouse::MouseWheel;
 use bevy::pbr::{MaterialPlugin, Material};
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderRef};
@@ -375,16 +375,18 @@ fn follow_camera(
 // Escape releases the cursor grab.
 
 fn mouse_controls(
-    mut mouse_motion: EventReader<MouseMotion>,
     mut mouse_wheel: EventReader<MouseWheel>,
     mut controls: ResMut<PilotControls>,
     keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
     mut app_exit: EventWriter<AppExit>,
 ) {
-    const ELEV_SENS: f64 = 0.08;  // rad per pixel/s (scaled by delta pixels)
-    const AIL_SENS: f64 = 0.08;
-    const MAX_DEF: f64 = 0.436; // ≈ 25°
+    const MAX_DEF: f64 = 0.436;    // ≈ 25°
+    const RATE: f64    = 1.2;      // rad/s ramp rate (full deflection in ~0.36 s)
+    const RETURN: f64  = 2.5;      // rad/s return rate (snap back quickly)
     const THROTTLE_STEP: f64 = 0.05;
+
+    let dt = time.delta_secs_f64();
 
     // Escape exits the application.
     if keys.just_pressed(KeyCode::Escape) {
@@ -397,19 +399,32 @@ fn mouse_controls(
             (controls.throttle + ev.y as f64 * THROTTLE_STEP).clamp(0.0, 1.0);
     }
 
-    // Sum all mouse deltas this frame; the aggregate pixel velocity maps
-    // directly to stick deflection.  When the mouse is stationary the
-    // controls spring back to zero (no accumulation).
-    let mut dx = 0.0_f32;
-    let mut dy = 0.0_f32;
-    for ev in mouse_motion.read() {
-        dx += ev.delta.x;
-        dy += ev.delta.y;
+    // ── Elevator: W = nose-up (+), S = nose-down (−) ────────────────────────
+    let elev_input =
+          keys.pressed(KeyCode::KeyW) as i32
+        - keys.pressed(KeyCode::KeyS) as i32;
+    if elev_input != 0 {
+        controls.elevator =
+            (controls.elevator + elev_input as f64 * RATE * dt).clamp(-MAX_DEF, MAX_DEF);
+    } else {
+        // Spring back toward zero.
+        let mag = controls.elevator.abs();
+        let step = (RETURN * dt).min(mag);
+        controls.elevator -= controls.elevator.signum() * step;
     }
 
-    // Invert Y so pulling the mouse toward you raises the nose.
-    controls.elevator = (-dy as f64 * ELEV_SENS).clamp(-MAX_DEF, MAX_DEF);
-    controls.aileron  = ( dx as f64 * AIL_SENS ).clamp(-MAX_DEF, MAX_DEF);
+    // ── Aileron: D = roll-right (+), A = roll-left (−) ──────────────────────
+    let ail_input =
+          keys.pressed(KeyCode::KeyD) as i32
+        - keys.pressed(KeyCode::KeyA) as i32;
+    if ail_input != 0 {
+        controls.aileron =
+            (controls.aileron + ail_input as f64 * RATE * dt).clamp(-MAX_DEF, MAX_DEF);
+    } else {
+        let mag = controls.aileron.abs();
+        let step = (RETURN * dt).min(mag);
+        controls.aileron -= controls.aileron.signum() * step;
+    }
 }
 
 // ── HUD ──────────────────────────────────────────────────────────────────────
