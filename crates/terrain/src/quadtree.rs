@@ -180,6 +180,15 @@ impl QuadTree {
         ops
     }
 
+    /// Tear down the entire tree, returning despawn ops for every live entity.
+    /// The tree is reset to a fresh root so the next `update` rebuilds from scratch.
+    pub fn reset(&mut self) -> Vec<DeltaOp> {
+        let mut ops = Vec::new();
+        self.root.collect_entities(&mut ops);
+        self.root = QuadNode::new(0.0, 0.0, ROOT_HALF);
+        ops
+    }
+
     /// Record the Bevy entity assigned to a freshly-spawned tile (identified
     /// by the `slot` pointer from a `DeltaOp::Spawn`).
     pub fn assign_entity(&mut self, slot: usize, entity: Entity) {

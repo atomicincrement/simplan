@@ -104,7 +104,7 @@ pub fn build_tile_mesh(cx: f32, cz: f32, half: f32, cfg: &TerrainConfig) -> Mesh
                 fx, fz,
                 cfg.centre_lat, cfg.centre_lon,
             );
-            cache.elevation_at(lat, lon, zoom).max(0.0)
+            cache.elevation_at_nonblocking(lat, lon, zoom).max(0.0)
         } else {
             // FBM noise fallback.
             let sp = project(fx, fz);

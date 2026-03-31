@@ -1,10 +1,13 @@
 //! Thread-safe two-level cache (memory + disk) for elevation tiles.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use crate::{
@@ -23,8 +26,10 @@ pub struct GeoCache {
 }
 
 struct Inner {
-    elevation: Mutex<HashMap<(i32, i32, u32), Arc<ElevationTile>>>,
-    cache_dir: PathBuf,
+    elevation:   Mutex<HashMap<(i32, i32, u32), Arc<ElevationTile>>>,
+    inflight:    Mutex<HashSet<(i32, i32, u32)>>,
+    fetch_count: AtomicU32,
+    cache_dir:   PathBuf,
 }
 
 impl GeoCache {
@@ -48,7 +53,9 @@ impl GeoCache {
 
         Self {
             inner: Arc::new(Inner {
-                elevation: Mutex::new(HashMap::new()),
+                elevation:   Mutex::new(HashMap::new()),
+                inflight:    Mutex::new(HashSet::new()),
+                fetch_count: AtomicU32::new(0),
                 cache_dir,
             }),
         }
@@ -61,6 +68,44 @@ impl GeoCache {
         let tile = self.get_tile(tx, ty, zoom);
         let (fx, fy) = lat_lon_frac_in_tile(lat_deg, lon_deg, zoom);
         tile.sample(fx as f32, fy as f32)
+    }
+
+    /// Non-blocking elevation sample.  Returns the cached value immediately if
+    /// the tile is in memory, otherwise returns 0.0 and spawns a background
+    /// thread to fetch the tile.  Call `fetch_count()` to detect when new
+    /// tiles have arrived so callers can request a rebuild.
+    pub fn elevation_at_nonblocking(&self, lat_deg: f64, lon_deg: f64, zoom: u32) -> f32 {
+        let (tx, ty) = lat_lon_to_tile_xy(lat_deg, lon_deg, zoom);
+
+        // Fast path: already cached in memory.
+        {
+            let map = self.inner.elevation.lock().unwrap();
+            if let Some(t) = map.get(&(tx, ty, zoom)) {
+                let (fx, fy) = lat_lon_frac_in_tile(lat_deg, lon_deg, zoom);
+                return t.sample(fx as f32, fy as f32);
+            }
+        }
+
+        // Tile not cached — kick off a background fetch if not already in flight.
+        {
+            let mut inflight = self.inner.inflight.lock().unwrap();
+            if inflight.insert((tx, ty, zoom)) {
+                let cache = self.clone();
+                std::thread::spawn(move || {
+                    cache.get_tile(tx, ty, zoom); // loads, caches, increments counter
+                    cache.inner.inflight.lock().unwrap().remove(&(tx, ty, zoom));
+                });
+            }
+        }
+
+        0.0
+    }
+
+    /// Number of tiles that have been loaded into the memory cache.
+    /// Increments each time a new tile is inserted (disk or network).
+    /// Use this as a generation counter to detect when new data is available.
+    pub fn fetch_count(&self) -> u32 {
+        self.inner.fetch_count.load(Ordering::Relaxed)
     }
 
     // ── Internal ─────────────────────────────────────────────────────────────
@@ -78,6 +123,7 @@ impl GeoCache {
         let tile = self.load_or_fetch(x, y, zoom);
         let tile = Arc::new(tile);
         self.inner.elevation.lock().unwrap().insert((x, y, zoom), Arc::clone(&tile));
+        self.inner.fetch_count.fetch_add(1, Ordering::Relaxed);
         tile
     }
 

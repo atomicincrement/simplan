@@ -65,8 +65,11 @@ impl Default for TerrainConfig {
 
 #[derive(Resource)]
 pub struct TerrainState {
-    pub tree:     QuadTree,
-    pub material: Handle<StandardMaterial>,
+    pub tree:              QuadTree,
+    pub material:          Handle<StandardMaterial>,
+    /// Last value of GeoCache::fetch_count() we acted on.
+    /// When the cache reports a higher count, all tiles are rebuilt.
+    pub last_geodata_gen:  u32,
 }
 
 // ── Marker component ─────────────────────────────────────────────────────────
@@ -91,7 +94,7 @@ impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TerrainConfig>()
             .add_systems(Startup, setup_terrain)
-            .add_systems(Update, (update_terrain, poll_terrain_tasks, despawn_stale_tiles));
+            .add_systems(Update, (update_terrain, poll_terrain_tasks, despawn_stale_tiles, watch_geodata_loads));
     }
 }
 
@@ -107,8 +110,9 @@ fn setup_terrain(
     });
 
     commands.insert_resource(TerrainState {
-        tree:     QuadTree::new(),
+        tree:             QuadTree::new(),
         material,
+        last_geodata_gen: 0,
     });
 }
 
@@ -180,5 +184,28 @@ fn despawn_stale_tiles(
 ) {
     for entity in query.iter() {
         commands.entity(entity).despawn_recursive();
+    }
+}
+
+/// When new elevation tiles have been loaded into the GeoCache, reset the
+/// quad-tree so all tiles rebuild with real heights.
+fn watch_geodata_loads(
+    cfg:          Res<TerrainConfig>,
+    mut state:    ResMut<TerrainState>,
+    mut commands: Commands,
+) {
+    let Some(ref cache) = cfg.geo_cache else { return; };
+    let new_gen = cache.fetch_count();
+    if new_gen <= state.last_geodata_gen {
+        return;
+    }
+    state.last_geodata_gen = new_gen;
+
+    // Despawn all existing tiles and reset the tree; update_terrain will
+    // re-spawn everything fresh using the newly cached elevation data.
+    for op in state.tree.reset() {
+        if let crate::quadtree::DeltaOp::Despawn(e) = op {
+            commands.entity(e).insert(TileDespawnPending);
+        }
     }
 }
