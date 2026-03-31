@@ -1,5 +1,14 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
+use fdm::atmo::atmosphere;
+use fdm::f35::aero::{aerodynamics, AeroIn};
+use fdm::f35::prop::propulsion;
+use fdm::math::Vec3 as FdmVec3;
+
+// ── Unit-conversion constants (imperial ↔ SI) ────────────────────────────────
+const M_TO_FT: f32 = 3.280_84;
+const LBF_TO_N: f32 = 4.448_22;
+const LBFFT_TO_NM: f32 = 1.355_82;
 
 fn main() {
     App::new()
@@ -11,11 +20,13 @@ fn main() {
             ..default()
         }))
         .add_plugins(PhysicsPlugins::default())
+        .init_resource::<PilotControls>()
         .insert_resource(AmbientLight {
             color: Color::WHITE,
             brightness: 400.0,
         })
         .add_systems(Startup, setup)
+        .add_systems(Update, apply_aerodynamics)
         .run();
 }
 
@@ -23,6 +34,31 @@ fn main() {
 
 #[derive(Component)]
 struct Aircraft;
+
+// ── Pilot inputs ─────────────────────────────────────────────────────────────
+
+#[derive(Resource)]
+struct PilotControls {
+    /// 0 = idle, 1 = full afterburner
+    throttle: f64,
+    /// Elevator deflection in radians (+nose-up)
+    elevator: f64,
+    /// Aileron deflection in radians (+right-wing-down)
+    aileron: f64,
+    /// Rudder deflection in radians (+nose-right)
+    rudder: f64,
+}
+
+impl Default for PilotControls {
+    fn default() -> Self {
+        Self {
+            throttle: 0.6,
+            elevator: 0.0,
+            aileron: 0.0,
+            rudder: 0.0,
+        }
+    }
+}
 
 // ── Startup system ──────────────────────────────────────────────────────────
 
@@ -184,7 +220,11 @@ fn spawn_aircraft(
             Aircraft,
             RigidBody::Dynamic,
             Collider::cuboid(11.0, 3.5, 11.0),
+            // F-35A combat-weight mass: 38 750 lbf / 32.174 ft/s² ≈ 17 576 kg
+            Mass(17_576.0_f32),
             LinearVelocity(Vec3::new(0.0, 0.0, -100.0)),
+            ExternalForce::default(),
+            ExternalTorque::default(),
         ))
         .with_children(|p| {
             // ── Fuselage (main spine) ──────────────────────────────────────
@@ -273,4 +313,104 @@ fn spawn_aircraft(
                 Transform::from_xyz(-1.6, -0.9, 0.8),
             ));
         });
+}
+
+// ── Aerodynamics system ───────────────────────────────────────────────────────
+//
+// Coordinate mappings (aircraft nose faces –Z in Bevy):
+//   FDM body X (forward) ↔ Bevy local –Z
+//   FDM body Y (right)   ↔ Bevy local +X
+//   FDM body Z (down)    ↔ Bevy local –Y
+//
+// Velocity:  u =  –v_local.z * M_TO_FT
+//            v =   v_local.x * M_TO_FT
+//            w =  –v_local.y * M_TO_FT
+//
+// Rates:     p = –ω_local.z   (roll,  body X = –Z_local)
+//            q =  ω_local.x   (pitch, body Y =  X_local)
+//            r = –ω_local.y   (yaw,   body Z = –Y_local)
+//
+// Force body → Bevy local:  (body_y, –body_z, –body_x) * LBF_TO_N
+// Torque body → Bevy local: (M, –N, –L) * LBFFT_TO_NM
+
+fn apply_aerodynamics(
+    mut query: Query<
+        (
+            &Transform,
+            &LinearVelocity,
+            &AngularVelocity,
+            &mut ExternalForce,
+            &mut ExternalTorque,
+        ),
+        With<Aircraft>,
+    >,
+    controls: Res<PilotControls>,
+) {
+    for (transform, lin_vel, ang_vel, mut ext_force, mut ext_torque) in &mut query {
+        let rotation = transform.rotation;
+        let inv_rot = rotation.inverse();
+
+        // Transform world-frame velocities into the aircraft's local frame.
+        let v_local = inv_rot * lin_vel.0;
+        let w_local = inv_rot * ang_vel.0;
+
+        // Convert to FDM body-frame velocities (ft/s).
+        let u = (-v_local.z * M_TO_FT) as f64;
+        let v = (v_local.x * M_TO_FT) as f64;
+        let w = (-v_local.y * M_TO_FT) as f64;
+
+        // Angular rates in FDM body frame (rad/s).
+        let p = (-w_local.z) as f64;
+        let q = (w_local.x) as f64;
+        let r = (-w_local.y) as f64;
+
+        // Altitude (ft) — clamp to sea level so atmo model stays valid on the ground.
+        let altitude_ft = (transform.translation.y * M_TO_FT).max(0.0) as f64;
+        let atmo = atmosphere(altitude_ft);
+
+        // Aerodynamic forces / moments.
+        let aero = aerodynamics(&AeroIn {
+            vel_aero: FdmVec3::new(u, v, w),
+            pqr: FdmVec3::new(p, q, r),
+            alpha_dot: 0.0,
+            rho: atmo.density,
+            sound_speed: atmo.sound_speed,
+            elevator_rad: controls.elevator,
+            aileron_rad: controls.aileron,
+            rudder_rad: controls.rudder,
+        });
+
+        // Propulsion: thrust along body X (forward).
+        let mach = aero.vt / atmo.sound_speed;
+        let prop = propulsion(controls.throttle, mach, atmo.density);
+
+        // Total body-frame forces (lbf): aero + thrust along X.
+        let body_fx = aero.force_body.x + prop.thrust_lbf;
+        let body_fy = aero.force_body.y;
+        let body_fz = aero.force_body.z;
+
+        // Map to Bevy local frame and convert to N.
+        //   Bevy local X ← body Y
+        //   Bevy local Y ← –body Z
+        //   Bevy local Z ← –body X
+        let f_local = Vec3::new(
+            body_fy as f32 * LBF_TO_N,
+            -body_fz as f32 * LBF_TO_N,
+            -body_fx as f32 * LBF_TO_N,
+        );
+
+        // Map moments to Bevy local frame and convert to N·m.
+        //   Bevy local X ← M (pitch)
+        //   Bevy local Y ← –N (yaw)
+        //   Bevy local Z ← –L (roll)
+        let t_local = Vec3::new(
+            aero.moment_body.y as f32 * LBFFT_TO_NM,
+            -aero.moment_body.z as f32 * LBFFT_TO_NM,
+            -aero.moment_body.x as f32 * LBFFT_TO_NM,
+        );
+
+        // Rotate into world frame and apply.
+        **ext_force = rotation * f_local;
+        **ext_torque = rotation * t_local;
+    }
 }
