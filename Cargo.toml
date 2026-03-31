@@ -2,6 +2,7 @@
 members = [
     "crates/sim",
     "crates/fdm",
+    "crates/terrain",
 ]
 resolver = "2"
 
