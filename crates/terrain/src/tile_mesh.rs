@@ -28,9 +28,9 @@ use crate::{
 
 use geodata::tile::{flat_to_lat_lon, zoom_for_half};
 
-/// Number of quads along each tile edge (65×65 vertex grid = 64×64 quads).
-pub const GRID: usize = 64;
-const VERTS: usize = GRID + 1;   // vertices per side = 65
+/// Number of quads along each tile edge (129×129 vertex grid = 128×128 quads).
+pub const GRID: usize = 128;
+const VERTS: usize = GRID + 1;   // vertices per side = 129
 
 // ── Altitude colour ramp ─────────────────────────────────────────────────────
 //

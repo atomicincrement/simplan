@@ -55,5 +55,5 @@ pub fn zoom_for_half(half: f32, lat_deg: f64) -> u32 {
     // We want ~128 elevation pixels across the tile.
     let wanted_tile_width_m = tile_width_m;   // one Terrarium tile per terrain tile
     let z = (circ / (256.0 * wanted_tile_width_m)).log2().round() as i32;
-    z.clamp(5, 14) as u32
+    z.clamp(5, 15) as u32
 }

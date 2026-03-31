@@ -14,10 +14,10 @@ use bevy::prelude::Entity;
 
 /// Split a tile when the camera's nearest distance to its bounding square is
 /// less than `half * SPLIT_FACTOR`.
-const SPLIT_FACTOR: f32 = 3.0;
+const SPLIT_FACTOR: f32 = 4.0;
 
 /// Finest tile half-size in metres (smallest tiles that will be meshed).
-const MIN_HALF: f32 = 128.0;
+const MIN_HALF: f32 = 64.0;
 
 // ── Data types ───────────────────────────────────────────────────────────────
 
