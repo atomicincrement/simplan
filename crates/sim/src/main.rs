@@ -135,45 +135,7 @@ fn setup(
         Collider::half_space(Vec3::Y),
     ));
 
-    // ── Runway ────────────────────────────────────────────────────────────
-    // Main asphalt strip (30 m wide × 1 000 m long, along Z)
-    let asphalt_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.22, 0.22, 0.22),
-        perceptual_roughness: 0.95,
-        ..default()
-    });
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(30.0, 1_000.0))),
-        MeshMaterial3d(asphalt_mat),
-        Transform::from_xyz(0.0, 0.001, 0.0),
-    ));
-
-    // Centre-line dashes
-    let white_mat = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
-        ..default()
-    });
-    for i in -24..=24 {
-        commands.spawn((
-            Mesh3d(meshes.add(Plane3d::default().mesh().size(1.0, 8.0))),
-            MeshMaterial3d(white_mat.clone()),
-            Transform::from_xyz(0.0, 0.003, i as f32 * 20.0),
-        ));
-    }
-
-    // Threshold bars (both ends)
-    for &z_sign in &[-1.0_f32, 1.0] {
-        for stripe in -3..=3 {
-            commands.spawn((
-                Mesh3d(meshes.add(Plane3d::default().mesh().size(3.0, 3.0))),
-                MeshMaterial3d(white_mat.clone()),
-                Transform::from_xyz(stripe as f32 * 4.0, 0.003, z_sign * 495.0),
-            ));
-        }
-    }
-
     // ── Aircraft ──────────────────────────────────────────────────────────
-    // Start 2 km from the runway centre at 500 m altitude, heading north.
     spawn_aircraft(
         &mut commands,
         &mut meshes,
