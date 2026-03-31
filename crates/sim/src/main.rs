@@ -34,7 +34,6 @@ fn main() {
         .add_plugins(SkyPlugin)
         .insert_resource(ClearColor(Color::BLACK))
         .init_resource::<PilotControls>()
-        .init_resource::<SimClock>()
         .insert_resource(AmbientLight {
             // Dim, slightly blue-warm: scattered morning skylight.
             color: Color::srgb(0.65, 0.72, 0.90),
@@ -42,7 +41,7 @@ fn main() {
         })
         .add_systems(Startup, (setup, setup_hud))
         .add_systems(PhysicsSchedule, apply_aerodynamics.in_set(PhysicsStepSet::First))
-        .add_systems(Update, (mouse_controls, follow_camera, update_hud, log_telemetry))
+        .add_systems(Update, (mouse_controls, follow_camera, update_hud))
         .run();
 }
 
@@ -60,15 +59,6 @@ struct FollowCamera;
 #[derive(Component)] struct StickDot;
 #[derive(Component)] struct AltimeterDisplay;
 #[derive(Component)] struct AirspeedDisplay;
-
-// ── Simulation clock ─────────────────────────────────────────────────────────────────
-
-#[derive(Resource, Default)]
-struct SimClock {
-    elapsed:   f64,
-    next_log:  f64,
-    logged_header: bool,
-}
 
 // ── Pilot inputs ─────────────────────────────────────────────────────────────
 
@@ -633,36 +623,6 @@ fn update_hud(
 // Aircraft starts at Bevy world (0, 500, 2000) m heading −Z (north):
 //   pos_n = (2000 − z) × M_TO_FT
 //   pos_e =        x   × M_TO_FT
-
-fn log_telemetry(
-    time: Res<Time>,
-    mut clock: ResMut<SimClock>,
-    query: Query<(&Transform, &LinearVelocity), With<Aircraft>>,
-) {
-    clock.elapsed += time.delta_secs_f64();
-
-    let Ok((xform, vel)) = query.get_single() else { return; };
-
-    if !clock.logged_header {
-        println!(
-            "{:>7}  {:>9}  {:>9}  {:>10}  {:>10}  (bevy)",
-            "t[s]", "alt[ft]", "vt[fps]", "pos_n[ft]", "pos_e[ft]"
-        );
-        clock.logged_header = true;
-    }
-
-    if clock.elapsed >= clock.next_log {
-        let alt_ft  = (xform.translation.y * M_TO_FT) as f64;
-        let vt_fps  = (vel.0.length() * M_TO_FT) as f64;
-        let pos_n   = ((2000.0 - xform.translation.z) * M_TO_FT) as f64;
-        let pos_e   = (xform.translation.x * M_TO_FT) as f64;
-        println!(
-            "{:7.1}  {:9.1}  {:9.2}  {:10.1}  {:10.1}",
-            clock.elapsed, alt_ft, vt_fps, pos_n, pos_e,
-        );
-        clock.next_log += 1.0;
-    }
-}
 
 // ── Aerodynamics system ───────────────────────────────────────────────────────
 //

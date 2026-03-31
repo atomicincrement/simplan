@@ -88,20 +88,21 @@ impl GeoCache {
         if path.exists() {
             if let Ok(bytes) = fs::read(&path) {
                 if let Some(t) = ElevationTile::from_bytes(&bytes) {
+                    eprintln!("[geodata] disk  {zoom}/{x}/{y}");
                     return t;
                 }
             }
         }
 
         // Fetch from AWS Terrain Tiles.
-        eprintln!("[geodata] fetching elevation {zoom}/{x}/{y} …");
+        eprintln!("[geodata] fetch {zoom}/{x}/{y} …");
         let tile = match fetch_elevation_tile(x, y, zoom) {
             Ok(t) => {
-                eprintln!("[geodata] elevation {zoom}/{x}/{y} OK");
+                eprintln!("[geodata] fetch {zoom}/{x}/{y} OK");
                 t
             }
             Err(e) => {
-                eprintln!("[geodata] elevation {zoom}/{x}/{y} FAILED: {e}");
+                eprintln!("[geodata] fetch {zoom}/{x}/{y} FAILED: {e}");
                 ElevationTile::flat()
             }
         };
