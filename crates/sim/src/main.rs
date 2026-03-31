@@ -1,5 +1,7 @@
 use avian3d::prelude::*;
+use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
+use bevy::window::CursorGrabMode;
 use fdm::atmo::atmosphere;
 use fdm::f35::aero::{aerodynamics, AeroIn};
 use fdm::f35::prop::propulsion;
@@ -25,15 +27,18 @@ fn main() {
             color: Color::WHITE,
             brightness: 400.0,
         })
-        .add_systems(Startup, setup)
-        .add_systems(Update, apply_aerodynamics)
+        .add_systems(Startup, (setup, grab_cursor))
+        .add_systems(Update, (apply_aerodynamics, mouse_controls, follow_camera))
         .run();
 }
 
-// ── Marker component ────────────────────────────────────────────────────────
+// ── Marker components ───────────────────────────────────────────────────────
 
 #[derive(Component)]
 struct Aircraft;
+
+#[derive(Component)]
+struct FollowCamera;
 
 // ── Pilot inputs ─────────────────────────────────────────────────────────────
 
@@ -71,6 +76,7 @@ fn setup(
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(-30.0, 20.0, 350.0).looking_at(Vec3::new(0.0, 3.0, 0.0), Vec3::Y),
+        FollowCamera,
     ));
 
     // ── Sun ───────────────────────────────────────────────────────────────
@@ -313,6 +319,69 @@ fn spawn_aircraft(
                 Transform::from_xyz(-1.6, -0.9, 0.8),
             ));
         });
+}
+
+// ── Cursor grab ──────────────────────────────────────────────────────────────
+
+fn grab_cursor(mut window_q: Query<&mut Window>) {
+    if let Ok(mut window) = window_q.get_single_mut() {
+        window.cursor_options.grab_mode = CursorGrabMode::Locked;
+        window.cursor_options.visible = false;
+    }
+}
+
+// ── Following camera ─────────────────────────────────────────────────────────
+//
+// Sits 35 m behind and 8 m above the aircraft in its local frame, looking
+// toward a point 50 m ahead of the nose.
+
+fn follow_camera(
+    aircraft_q: Query<&Transform, With<Aircraft>>,
+    mut camera_q: Query<&mut Transform, (With<FollowCamera>, Without<Aircraft>)>,
+) {
+    let (Ok(ac), Ok(mut cam)) = (aircraft_q.get_single(), camera_q.get_single_mut()) else {
+        return;
+    };
+
+    // Aircraft nose points –Z in Bevy; "behind" is +Z in local space.
+    let cam_offset = ac.rotation * Vec3::new(0.0, 8.0, 35.0);
+    let look_target = ac.translation + ac.rotation * Vec3::new(0.0, 1.0, -50.0);
+
+    cam.translation = ac.translation + cam_offset;
+    cam.look_at(look_target, Vec3::Y);
+}
+
+// ── Mouse controls ────────────────────────────────────────────────────────────
+//
+// Mouse Y (up)   → elevator +  (nose up)
+// Mouse X (right) → aileron +  (right wing down / roll right)
+// Escape releases the cursor grab.
+
+fn mouse_controls(
+    mut mouse_motion: EventReader<MouseMotion>,
+    mut controls: ResMut<PilotControls>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut window_q: Query<&mut Window>,
+) {
+    const ELEV_SENS: f64 = 0.003;
+    const AIL_SENS: f64 = 0.003;
+    const MAX_DEF: f64 = 0.436; // ≈ 25 °
+
+    // Escape releases the cursor so the window can be closed.
+    if keys.just_pressed(KeyCode::Escape) {
+        if let Ok(mut window) = window_q.get_single_mut() {
+            window.cursor_options.grab_mode = CursorGrabMode::None;
+            window.cursor_options.visible = true;
+        }
+    }
+
+    for ev in mouse_motion.read() {
+        // Invert Y so pulling mouse back raises the nose.
+        controls.elevator =
+            (controls.elevator - ev.delta.y as f64 * ELEV_SENS).clamp(-MAX_DEF, MAX_DEF);
+        controls.aileron =
+            (controls.aileron + ev.delta.x as f64 * AIL_SENS).clamp(-MAX_DEF, MAX_DEF);
+    }
 }
 
 // ── Aerodynamics system ───────────────────────────────────────────────────────
