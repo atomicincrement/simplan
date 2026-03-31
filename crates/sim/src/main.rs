@@ -167,14 +167,14 @@ fn setup(
     ));
 
     // ── Runway ────────────────────────────────────────────────────────────
-    // Main asphalt strip (30 m wide × 200 m long, along Z)
+    // Main asphalt strip (30 m wide × 1 000 m long, along Z)
     let asphalt_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.22, 0.22, 0.22),
         perceptual_roughness: 0.95,
         ..default()
     });
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(30.0, 200.0))),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(30.0, 1_000.0))),
         MeshMaterial3d(asphalt_mat),
         Transform::from_xyz(0.0, 0.001, 0.0),
     ));
@@ -184,7 +184,7 @@ fn setup(
         base_color: Color::WHITE,
         ..default()
     });
-    for i in -9..=9 {
+    for i in -24..=24 {
         commands.spawn((
             Mesh3d(meshes.add(Plane3d::default().mesh().size(1.0, 8.0))),
             MeshMaterial3d(white_mat.clone()),
@@ -198,13 +198,13 @@ fn setup(
             commands.spawn((
                 Mesh3d(meshes.add(Plane3d::default().mesh().size(3.0, 3.0))),
                 MeshMaterial3d(white_mat.clone()),
-                Transform::from_xyz(stripe as f32 * 4.0, 0.003, z_sign * 95.0),
+                Transform::from_xyz(stripe as f32 * 4.0, 0.003, z_sign * 495.0),
             ));
         }
     }
 
     // ── Aircraft ──────────────────────────────────────────────────────────
-    // Start 2 km from the runway threshold at 500 m altitude, heading toward it.
+    // Start 2 km from the runway centre at 500 m altitude, heading north.
     spawn_aircraft(
         &mut commands,
         &mut meshes,

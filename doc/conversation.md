@@ -80,3 +80,18 @@
 - When `MouseButton::Left` is pressed and cursor is inside the box: normalize cursor to [-1,1] per axis, scale by `MAX_DEF`, write `aileron`/`elevator`; `return` early.
 - Otherwise (LMB not held or cursor outside box): set `elevator = 0.0`, `aileron = 0.0`.
 - Build clean. Committed `9ffd806`, pushed.
+
+---
+
+**User:** Make the ground plane a hundred times larger. Add a 3km high mountain 10km north of the runway.
+**Action:**
+- Ground plane: `10_000` → `1_000_000` m each side; UV scale `50.0` → `5000.0` (keeps 100 m checker squares); subdivisions reduced to 4 (flat plane needs no more).
+- Added mountain: `Cone { radius: 2_000.0, height: 3_000.0 }`, rocky gray `StandardMaterial`, `Transform::from_xyz(0.0, 1_500.0, -10_000.0)` — Bevy's Cone is origin-centred (apex at +half_height, base at -half_height), so y=1500 puts base at y=0 and apex at y=3000 m. North = −Z in Bevy, so Z = −10 000 m.
+- Build clean. Committed `26c601f`, pushed.
+
+---
+
+**User:** Add a README with running instructions for the Bevy version. Add instructions for installing Rust on Linux, Windows and Mac.
+**Action:**
+- Created `README.md` at workspace root covering: project description, Rust installation (Linux via rustup + distro system deps for Bevy, Windows via win.rustup.rs + MSVC tools, macOS via rustup + xcode-select), `cargo run` / `cargo run --release` instructions, FDM headless example command, controls table, project structure tree.
+- Committed `64b8b70`, pushed.
