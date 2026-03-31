@@ -70,3 +70,13 @@
 - In `update_hud`: added `LinearVelocity` to the `aircraft_q` query; added `airspeed_q`; set `**text = format!("IAS {:3.0} kt", vel.0.length() * 1.94384)`.
 - Added `Without<AirspeedDisplay>` filters to `compass_q` and `altimeter_q` to satisfy Bevy's query ambiguity check.
 - Build clean. Committed `6386c1e`, pushed.
+
+---
+
+**User:** Reinstitute the mouse control tracking using the stick position box. Only move the stick when the left button is down. Centre the stick otherwise.
+**Action:**
+- Restored `window_q: Query<&Window>` and `mouse_buttons: Res<ButtonInput<MouseButton>>` parameters to `mouse_controls`.
+- Restored box constants: `BOX_W=80`, `BOX_H=80`, `BOX_RIGHT=24`, `BOX_BOTTOM=40`, `MAX_DEF=0.436`.
+- When `MouseButton::Left` is pressed and cursor is inside the box: normalize cursor to [-1,1] per axis, scale by `MAX_DEF`, write `aileron`/`elevator`; `return` early.
+- Otherwise (LMB not held or cursor outside box): set `elevator = 0.0`, `aileron = 0.0`.
+- Build clean. Committed `9ffd806`, pushed.

@@ -408,7 +408,7 @@ fn mouse_controls(
     const BOX_H: f32 = 80.0;
     const BOX_RIGHT: f32 = 24.0;
     const BOX_BOTTOM: f32 = 40.0;
-    const MAX_DEF: f64 = 0.436; // ≈ 25° max deflection (rad)
+    const MAX_DEF: f64 = 0.0872; // ≈ 5° max deflection (rad) — 5× reduced sensitivity
 
     if keys.just_pressed(KeyCode::Escape) {
         app_exit.send(AppExit::Success);
@@ -648,7 +648,7 @@ fn update_hud(
 
     // Stick dot position in the 80×80 box (usable range 0–72 with 8 px dot).
     if let Ok(mut node) = stick_q.get_single_mut() {
-        const MAX_DEF: f64 = 0.436;
+        const MAX_DEF: f64 = 0.0872;
         let ail  = (controls.aileron  / MAX_DEF) as f32;
         let elev = (controls.elevator / MAX_DEF) as f32;
         let cx = (36.0 + ail  * 36.0).clamp(0.0, 72.0);
