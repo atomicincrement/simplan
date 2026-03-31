@@ -21,3 +21,23 @@
     - Three-point landing gear stubs
   - Camera positioned to view the aircraft over the runway.
   - Directional sunlight + ambient fill.
+---
+
+**User:** Use the f35 model to drive the avian physics model. Use the avian position and velocity as inputs to aerodynamics(), convert the output to a force and torque to apply to the model.
+
+**Action:**
+- Added `fdm` crate imports to `crates/sim/src/main.rs`: `atmosphere`, `aerodynamics`/`AeroIn`, `propulsion`, `fdm::math::Vec3 as FdmVec3`.
+- Added unit-conversion constants: `M_TO_FT = 3.28084`, `LBF_TO_N = 4.44822`, `LBFFT_TO_NM = 1.35582`.
+- Added `PilotControls` resource (throttle=0.6, controls=0) and registered it with `.init_resource::<PilotControls>()`.
+- Added `Mass(17_576.0)`, `ExternalForce::default()`, `ExternalTorque::default()` to the aircraft `spawn` bundle (Mass is F-35A combat weight: 38 750 lbf / 32.174 ft/s² × 14.594 kg/slug ≈ 17 576 kg).
+- Implemented `apply_aerodynamics` `Update` system:
+  - Reads `Transform`, `LinearVelocity`, `AngularVelocity` from the `Aircraft` entity.
+  - Transforms world-frame velocity/angular-rate into aircraft local frame via `rotation.inverse() * vel`.
+  - Maps local Bevy frame (nose = −Z) to FDM body frame (X fwd, Y right, Z down): u=−vz, v=vx, w=−vy; p=−ωz, q=ωx, r=−ωy; converts from m/s to ft/s.
+  - Calls `atmosphere(altitude_ft)` for ISA density/sound-speed; clamps altitude to ≥ 0.
+  - Calls `aerodynamics(&AeroIn{…})` for aero forces and moments; `propulsion(throttle, mach, rho)` for F135 thrust.
+  - Adds thrust (lbf) to body-X force component.
+  - Converts body-frame force to Bevy local frame: `(body_y, −body_z, −body_x) * LBF_TO_N`.
+  - Converts body-frame moments to Bevy local frame: `(M, −N, −L) * LBFFT_TO_NM`.
+  - Rotates both into world frame and writes to `ExternalForce`/`ExternalTorque` via `DerefMut`.
+- Build clean; pushed to `atomicincrement/simplan` master.
