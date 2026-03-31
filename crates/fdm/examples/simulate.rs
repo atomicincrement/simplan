@@ -1,11 +1,9 @@
 //! Simple simulation example for the C172p FDM.
 //!
-//! Demonstrates straight-and-level cruise, then a gentle pull-up.
-//!
 //! Run with:
-//!   cargo run --manifest-path rust_fdm/Cargo.toml --example simulate
+//!   cargo run -p fdm --example simulate
 
-use c172_fdm::{Controls, FlightModel};
+use fdm::c172::{Controls, FlightModel};
 
 fn main() {
     // Initial conditions: 3 000 ft MSL, 81 kt TAS – the natural trim speed

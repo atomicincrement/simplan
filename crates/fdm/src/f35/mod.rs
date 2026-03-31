@@ -7,7 +7,7 @@
 //! # Quick start
 //!
 //! ```rust
-//! use c172_fdm::f35::{FlightModel, Controls};
+//! use fdm::f35::{FlightModel, Controls};
 //!
 //! // 10 000 ft, Mach 0.5 (≈ 889 ft/s), heading East
 //! let mut fdm = FlightModel::new(10_000.0, 889.0, std::f64::consts::FRAC_PI_2);

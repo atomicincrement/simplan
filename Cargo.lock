@@ -1484,10 +1484,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
-name = "c172_fdm"
-version = "0.1.0"
-
-[[package]]
 name = "calloop"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2044,6 +2040,10 @@ checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
 ]
+
+[[package]]
+name = "fdm"
+version = "0.1.0"
 
 [[package]]
 name = "find-msvc-tools"
@@ -4230,7 +4230,7 @@ version = "0.1.0"
 dependencies = [
  "avian3d",
  "bevy",
- "c172_fdm",
+ "fdm",
 ]
 
 [[package]]

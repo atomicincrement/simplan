@@ -148,7 +148,7 @@ impl State {
         let weight = MASS * G0; // lbf
 
         // Required CL for level flight
-        let cl_needed = weight / (qbar * crate::aero::WING_AREA);
+        let cl_needed = weight / (qbar * crate::c172::aero::WING_AREA);
 
         // Linear CLwbh fit: CL ≈ 0.25 + 5.33·α  (valid 0 ≤ α ≤ 0.09 rad)
         // Clamp to a sensible range so we never start in stall.

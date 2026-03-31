@@ -1,8 +1,8 @@
 [package]
-name = "c172_fdm"
+name = "fdm"
 version = "0.1.0"
 edition = "2021"
-description = "C172p flight dynamics model translated from JSBSim"
+description = "Flight dynamics models (C172p, F-35A) based on JSBSim"
 
 [[example]]
 name = "simulate"
