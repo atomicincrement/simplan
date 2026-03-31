@@ -26,12 +26,14 @@ fn main() {
         }))
         .add_plugins(PhysicsPlugins::default())
         .init_resource::<PilotControls>()
+        .init_resource::<SimClock>()
         .insert_resource(AmbientLight {
             color: Color::WHITE,
             brightness: 400.0,
         })
         .add_systems(Startup, (setup, setup_hud))
-        .add_systems(Update, (apply_aerodynamics, mouse_controls, follow_camera, update_hud))
+        .add_systems(PhysicsSchedule, apply_aerodynamics.in_set(PhysicsStepSet::First))
+        .add_systems(Update, (mouse_controls, follow_camera, update_hud, log_telemetry))
         .run();
 }
 
@@ -48,6 +50,15 @@ struct FollowCamera;
 #[derive(Component)] struct CompassDisplay;
 #[derive(Component)] struct StickDot;
 #[derive(Component)] struct AltimeterDisplay;
+
+// ── Simulation clock ─────────────────────────────────────────────────────────────────
+
+#[derive(Resource, Default)]
+struct SimClock {
+    elapsed:   f64,
+    next_log:  f64,
+    logged_header: bool,
+}
 
 // ── Pilot inputs ─────────────────────────────────────────────────────────────
 
@@ -263,8 +274,8 @@ fn spawn_aircraft(
             // F-35A combat-weight mass: 38 750 lbf / 32.174 ft/s² ≈ 17 576 kg
             Mass(17_576.0_f32),
             LinearVelocity(Vec3::new(0.0, 0.0, -100.0)),
-            ExternalForce::default(),
-            ExternalTorque::default(),
+            ExternalForce::default().with_persistence(false),
+            ExternalTorque::default().with_persistence(false),
         ))
         .with_children(|p| {
             // ── Fuselage (main spine) ──────────────────────────────────────
@@ -386,16 +397,9 @@ fn mouse_controls(
     mut mouse_wheel: EventReader<MouseWheel>,
     mut controls: ResMut<PilotControls>,
     keys: Res<ButtonInput<KeyCode>>,
-    window_q: Query<&Window>,
     mut app_exit: EventWriter<AppExit>,
 ) {
-    const MAX_DEF: f64 = 0.436; // ≈ 25°
     const THROTTLE_STEP: f64 = 0.05;
-    // Must match the values in setup_hud.
-    const BOX_W: f32 = 80.0;
-    const BOX_H: f32 = 80.0;
-    const BOX_RIGHT:  f32 = 24.0;
-    const BOX_BOTTOM: f32 = 40.0;
 
     if keys.just_pressed(KeyCode::Escape) {
         app_exit.send(AppExit::Success);
@@ -406,33 +410,9 @@ fn mouse_controls(
             (controls.throttle + ev.y as f64 * THROTTLE_STEP).clamp(0.0, 1.0);
     }
 
-    let Ok(window) = window_q.get_single() else { return; };
-    let win_w = window.width();
-    let win_h = window.height();
-    // Box top-left in screen coordinates (origin = top-left of window).
-    let box_left = win_w - BOX_RIGHT - BOX_W;
-    let box_top  = win_h - BOX_BOTTOM - BOX_H;
-
-    let inside = window.cursor_position().and_then(|cur| {
-        if cur.x >= box_left && cur.x <= box_left + BOX_W
-            && cur.y >= box_top && cur.y <= box_top + BOX_H
-        {
-            Some(cur)
-        } else {
-            None
-        }
-    });
-
-    if let Some(cur) = inside {
-        // Map 0..BOX to -1..1; invert Y so up = nose-up.
-        let nx = ((cur.x - box_left) / BOX_W * 2.0 - 1.0) as f64;
-        let ny = ((cur.y - box_top)  / BOX_H * 2.0 - 1.0) as f64;
-        controls.aileron  = (nx * MAX_DEF).clamp(-MAX_DEF, MAX_DEF);
-        controls.elevator = (-ny * MAX_DEF).clamp(-MAX_DEF, MAX_DEF);
-    } else {
-        controls.aileron  = 0.0;
-        controls.elevator = 0.0;
-    }
+    // Stick centred – ignore mouse position for now.
+    controls.elevator = 0.0;
+    controls.aileron  = 0.0;
 }
 
 // ── HUD ──────────────────────────────────────────────────────────────────────
@@ -623,6 +603,48 @@ fn update_hud(
         let cy = (36.0 - elev * 36.0).clamp(0.0, 72.0);
         node.left = Val::Px(cx);
         node.top  = Val::Px(cy);
+    }
+}
+
+// ── Telemetry logger ──────────────────────────────────────────────────────────
+//
+// Prints one row per second to stdout in a format that matches simulate.rs so
+// the two runs can be diff-ed directly.
+//
+// Column definitions to match simulate.rs:
+//   t[s]  alt[ft]  vt[fps]  pos_n[ft]  pos_e[ft]
+//
+// Aircraft starts at Bevy world (0, 500, 2000) m heading −Z (north):
+//   pos_n = (2000 − z) × M_TO_FT
+//   pos_e =        x   × M_TO_FT
+
+fn log_telemetry(
+    time: Res<Time>,
+    mut clock: ResMut<SimClock>,
+    query: Query<(&Transform, &LinearVelocity), With<Aircraft>>,
+) {
+    clock.elapsed += time.delta_secs_f64();
+
+    let Ok((xform, vel)) = query.get_single() else { return; };
+
+    if !clock.logged_header {
+        println!(
+            "{:>7}  {:>9}  {:>9}  {:>10}  {:>10}  (bevy)",
+            "t[s]", "alt[ft]", "vt[fps]", "pos_n[ft]", "pos_e[ft]"
+        );
+        clock.logged_header = true;
+    }
+
+    if clock.elapsed >= clock.next_log {
+        let alt_ft  = (xform.translation.y * M_TO_FT) as f64;
+        let vt_fps  = (vel.0.length() * M_TO_FT) as f64;
+        let pos_n   = ((2000.0 - xform.translation.z) * M_TO_FT) as f64;
+        let pos_e   = (xform.translation.x * M_TO_FT) as f64;
+        println!(
+            "{:7.1}  {:9.1}  {:9.2}  {:10.1}  {:10.1}",
+            clock.elapsed, alt_ft, vt_fps, pos_n, pos_e,
+        );
+        clock.next_log += 1.0;
     }
 }
 
