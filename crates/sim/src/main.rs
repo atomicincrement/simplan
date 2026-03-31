@@ -398,9 +398,17 @@ fn mouse_controls(
     mut mouse_wheel: EventReader<MouseWheel>,
     mut controls: ResMut<PilotControls>,
     keys: Res<ButtonInput<KeyCode>>,
+    mouse_buttons: Res<ButtonInput<MouseButton>>,
+    window_q: Query<&Window>,
     mut app_exit: EventWriter<AppExit>,
 ) {
     const THROTTLE_STEP: f64 = 0.05;
+    // Stick box layout (matches setup_hud): right:24, bottom:40, 80×80 px.
+    const BOX_W: f32 = 80.0;
+    const BOX_H: f32 = 80.0;
+    const BOX_RIGHT: f32 = 24.0;
+    const BOX_BOTTOM: f32 = 40.0;
+    const MAX_DEF: f64 = 0.436; // ≈ 25° max deflection (rad)
 
     if keys.just_pressed(KeyCode::Escape) {
         app_exit.send(AppExit::Success);
@@ -411,7 +419,30 @@ fn mouse_controls(
             (controls.throttle + ev.y as f64 * THROTTLE_STEP).clamp(0.0, 1.0);
     }
 
-    // Stick centred – ignore mouse position for now.
+    // Drive the stick from cursor position inside the box only when LMB is held.
+    if mouse_buttons.pressed(MouseButton::Left) {
+        if let Ok(window) = window_q.get_single() {
+            if let Some(cursor) = window.cursor_position() {
+                let w = window.width();
+                let h = window.height();
+                // Box top-left corner in screen coords.
+                let box_x = w - BOX_RIGHT - BOX_W;
+                let box_y = h - BOX_BOTTOM - BOX_H;
+                let rel_x = cursor.x - box_x;
+                let rel_y = cursor.y - box_y;
+                if rel_x >= 0.0 && rel_x <= BOX_W && rel_y >= 0.0 && rel_y <= BOX_H {
+                    // Normalize to [-1, 1]; Y is inverted (screen down = pitch nose down).
+                    let nx = ((rel_x / BOX_W) * 2.0 - 1.0) as f64;
+                    let ny = -(((rel_y / BOX_H) * 2.0 - 1.0) as f64);
+                    controls.aileron  = (nx * MAX_DEF).clamp(-MAX_DEF, MAX_DEF);
+                    controls.elevator = (ny * MAX_DEF).clamp(-MAX_DEF, MAX_DEF);
+                    return;
+                }
+            }
+        }
+    }
+
+    // LMB not held, or cursor outside box — centre the stick.
     controls.elevator = 0.0;
     controls.aileron  = 0.0;
 }

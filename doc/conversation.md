@@ -60,3 +60,13 @@
 - Moved `apply_aerodynamics` from `Update` to `PhysicsSchedule` with `.in_set(PhysicsStepSet::First)` — runs once at the start of each fixed physics step, before BroadPhase/Solver.
 - Changed spawn to `ExternalForce::default().with_persistence(false)` and `ExternalTorque::default().with_persistence(false)` — forces are auto-cleared after each physics step so they can't accumulate stale values.
 - Build: clean. Committed and pushed: `bbcbf55`.
+
+---
+
+**User:** Add an airspeed indicator.
+**Action:**
+- Added `#[derive(Component)] struct AirspeedDisplay`.
+- Spawned `"IAS   0 kt"` text at `top: 66px, left: 50%` in `setup_hud` (below altimeter).
+- In `update_hud`: added `LinearVelocity` to the `aircraft_q` query; added `airspeed_q`; set `**text = format!("IAS {:3.0} kt", vel.0.length() * 1.94384)`.
+- Added `Without<AirspeedDisplay>` filters to `compass_q` and `altimeter_q` to satisfy Bevy's query ambiguity check.
+- Build clean. Committed `6386c1e`, pushed.
