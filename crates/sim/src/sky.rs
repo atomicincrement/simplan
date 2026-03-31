@@ -163,6 +163,7 @@ fn sky_color(dir: Vec3) -> [f32; 4] {
 fn build_skydome_mesh() -> Mesh {
     let total = (RINGS + 1) * (SECTORS + 1);
     let mut positions = Vec::with_capacity(total);
+    let mut colors    = Vec::with_capacity(total);
     let mut normals   = Vec::with_capacity(total);
     let mut uvs       = Vec::with_capacity(total);
 
@@ -175,7 +176,9 @@ fn build_skydome_mesh() -> Mesh {
             let x = sp * theta.cos();
             let y = cp;
             let z = sp * theta.sin();
+            let dir = Vec3::new(x, y, z);
             positions.push([x * SKY_RADIUS, y * SKY_RADIUS, z * SKY_RADIUS]);
+            colors.push(sky_color(dir));
             normals.push([-x, -y, -z]);
             uvs.push([s as f32 / SECTORS as f32, r as f32 / RINGS as f32]);
         }
@@ -197,6 +200,7 @@ fn build_skydome_mesh() -> Mesh {
     let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL,   normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR,    colors);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0,     uvs);
     mesh.insert_indices(Indices::U32(indices));
     mesh
@@ -255,10 +259,9 @@ fn setup_sky(
     mut meshes:   ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // DEBUG: solid bright magenta to confirm dome geometry is rendering at all.
-    // Once visible, we will restore vertex colours.
+    // Skydome: unlit, cull disabled, vertex colours carry the Rayleigh/Mie sky.
     let sky_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.0, 1.0),
+        base_color: Color::WHITE,
         unlit: true,
         double_sided: true,
         cull_mode: None,
