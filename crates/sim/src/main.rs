@@ -119,19 +119,6 @@ fn setup(
         Collider::half_space(Vec3::Y),
     ));
 
-    // ── Mountain (3 km peak, 10 km north of runway along –Z) ─────────────
-    let mountain_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.52, 0.49, 0.45),
-        perceptual_roughness: 1.0,
-        ..default()
-    });
-    commands.spawn((
-        Mesh3d(meshes.add(Cone { radius: 2_000.0, height: 3_000.0 })),
-        MeshMaterial3d(mountain_mat),
-        // Cone origin is at its centre; shift up by half height so base sits on y=0.
-        Transform::from_xyz(0.0, 1_500.0, -10_000.0),
-    ));
-
     // ── Runway ────────────────────────────────────────────────────────────
     // Main asphalt strip (30 m wide × 1 000 m long, along Z)
     let asphalt_mat = materials.add(StandardMaterial {

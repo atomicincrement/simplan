@@ -32,23 +32,21 @@ use tile_mesh::build_tile_mesh;
 #[derive(Resource, Clone)]
 pub struct TerrainConfig {
     /// Base spatial frequency of the noise evaluated on the unit sphere normal.
-    /// A value of ~64 produces features of roughly 100 km at Earth scale.
+    /// noise_frequency / EARTH_RADIUS ≈ cycles per metre in the tangent plane.
+    /// 400 → wavelength ≈ 16 km; dramatic mountains visible at 10–50 km range.
     pub noise_frequency: f32,
     /// Number of FBM octaves.  More octaves = more detail but slower meshing.
     pub noise_octaves: u32,
-    /// Peak-to-trough height of the terrain in metres.
+    /// Peak-to-trough height of the terrain in metres (+2 000 m / −2 000 m).
     pub height_scale: f32,
-    /// Albedo colour used for all terrain tiles.
-    pub base_color: Color,
 }
 
 impl Default for TerrainConfig {
     fn default() -> Self {
         Self {
-            noise_frequency: 64.0,
-            noise_octaves:   6,
+            noise_frequency: 400.0,
+            noise_octaves:   7,
             height_scale:    2_000.0,
-            base_color:      Color::srgb(0.35, 0.45, 0.25),
         }
     }
 }
@@ -81,10 +79,9 @@ impl Plugin for TerrainPlugin {
 fn setup_terrain(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    cfg: Res<TerrainConfig>,
 ) {
     let material = materials.add(StandardMaterial {
-        base_color: cfg.base_color,
+        base_color: Color::WHITE,
         perceptual_roughness: 0.9,
         reflectance: 0.1,
         ..default()

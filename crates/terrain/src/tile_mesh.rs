@@ -7,6 +7,7 @@
 // Each vertex is:
 //   1. Projected from flat (fx, fz) onto the sphere surface.
 //   2. Displaced along the surface normal by a multi-octave Perlin height.
+//   3. Coloured by world-space Y altitude (water → pasture → rock → snow).
 //
 // Smooth per-vertex normals are computed from finite differences of the height
 // field using a one-step stencil.
@@ -29,6 +30,47 @@ use crate::{
 pub const GRID: usize = 64;
 const VERTS: usize = GRID + 1;   // vertices per side = 65
 
+// ── Altitude colour ramp ─────────────────────────────────────────────────────
+//
+// Input `y` is world-space height in metres.  `height_scale` is the FBM
+// amplitude in metres so the palette is self-consistent regardless of scale.
+//
+// Stops (as fraction of height_scale):
+//   < -0.05  deep ocean blue
+//   -0.05..0 shallow / nearshore
+//   0..0.10  sandy beach
+//   0.10..0.5 green pasture
+//   0.5..0.80 grey rock
+//   0.80..1.0 snow / glaciers
+
+fn lerp_col(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    let t = t.clamp(0.0, 1.0);
+    [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t, 1.0]
+}
+
+fn altitude_color(y: f32, hs: f32) -> [f32; 4] {
+    let t = y / hs; // normalised; -1 → 1
+    const DEEP:    [f32; 4] = [0.04, 0.11, 0.38, 1.0];
+    const SHALLOW: [f32; 4] = [0.12, 0.32, 0.62, 1.0];
+    const BEACH:   [f32; 4] = [0.82, 0.76, 0.56, 1.0];
+    const PASTURE: [f32; 4] = [0.22, 0.52, 0.18, 1.0];
+    const ROCK:    [f32; 4] = [0.46, 0.43, 0.38, 1.0];
+    const SNOW:    [f32; 4] = [0.95, 0.95, 0.98, 1.0];
+    if t < -0.05 {
+        lerp_col(DEEP,    SHALLOW, (t + 1.0) / 0.95)
+    } else if t < 0.0 {
+        lerp_col(SHALLOW, BEACH,   (t + 0.05) / 0.05)
+    } else if t < 0.10 {
+        lerp_col(BEACH,   PASTURE,  t / 0.10)
+    } else if t < 0.50 {
+        lerp_col(PASTURE, ROCK,    (t - 0.10) / 0.40)
+    } else if t < 0.80 {
+        lerp_col(ROCK,    ROCK,    (t - 0.50) / 0.30)
+    } else {
+        lerp_col(ROCK,    SNOW,    (t - 0.80) / 0.20)
+    }
+}
+
 /// Build a terrain tile mesh.
 ///
 /// * `cx`, `cz` – flat tangent-plane centre of the tile (metres from origin)
@@ -41,6 +83,7 @@ pub fn build_tile_mesh(cx: f32, cz: f32, half: f32, cfg: &TerrainConfig) -> Mesh
     let total_verts = VERTS * VERTS;
     let mut positions = Vec::with_capacity(total_verts);
     let mut normals   = Vec::with_capacity(total_verts);
+    let mut colors    = Vec::with_capacity(total_verts);
     let mut uvs       = Vec::with_capacity(total_verts);
 
     // Helper: sample height at arbitrary flat (fx, fz).
@@ -75,13 +118,17 @@ pub fn build_tile_mesh(cx: f32, cz: f32, half: f32, cfg: &TerrainConfig) -> Mesh
             let fz = cz - half + j as f32 * step;
 
             // Position with height displacement.
-            positions.push(world_pos(fx, fz));
+            let pos = world_pos(fx, fz);
+            let world_y = pos[1];
+            positions.push(pos);
 
-            // UV: simple 0‥1 across the tile.
+            // Altitude-based vertex colour.
+            colors.push(altitude_color(world_y, cfg.height_scale));
+
+            // UV: simple 0…1 across the tile.
             uvs.push([i as f32 / GRID as f32, j as f32 / GRID as f32]);
 
             // Surface normal via central-difference of the height field.
-            // We approximate by comparing neighbour world positions.
             let px = world_pos(fx + nd, fz);
             let mx = world_pos(fx - nd, fz);
             let pz = world_pos(fx, fz + nd);
@@ -114,8 +161,9 @@ pub fn build_tile_mesh(cx: f32, cz: f32, half: f32, cfg: &TerrainConfig) -> Mesh
 
     let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL,   normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR,    colors);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0,     uvs);
     mesh.insert_indices(Indices::U32(indices));
     mesh
 }
@@ -137,3 +185,5 @@ pub fn terrain_height_at(fx: f32, fz: f32, cfg: &TerrainConfig) -> f32 {
     // Sphere surface y  +  noise displacement in y direction.
     sp.position[1] + sp.normal[1] * noise * cfg.height_scale
 }
+
+
