@@ -1,4 +1,4 @@
-//! Rigid-body equations of motion for the C172p.
+//! Rigid-body equations of motion – aircraft-agnostic 6-DoF core.
 //!
 //! **Coordinate frames**
 //! - Body:  X forward, Y right, Z down.
@@ -20,6 +20,7 @@ use crate::atmo::{self, G0};
 use crate::math::{dcm_ned2body, Vec3};
 
 // ── Aircraft mass properties (c172p.xml, mass_balance block) ─────────────────
+//  Kept for backward-compatibility; the integrators now accept a MassProps.
 
 /// Empty weight + typical pilot (500 lb fuel)
 const WEIGHT_LBF: f64 = 1500.0 + 180.0 + 200.0; // lbf
@@ -32,19 +33,49 @@ pub const IZZ: f64 = 1967.0;
 /// Products of inertia ≈ 0 (symmetric aircraft).
 pub const IXZ: f64 = 0.0;
 
-// Denominator for coupled p–r integration with Ixz ≠ 0.
-// Γ = Ixx·Izz − Ixz²
-const GAMMA: f64 = IXX * IZZ - IXZ * IXZ;
+// ── Generic mass-property bundle ─────────────────────────────────────────────
 
-// Coupled inertia combinations (Stevens & Lewis, eq. 1.4-12)
-const C1: f64 = ((IYY - IZZ) * IZZ - IXZ * IXZ) / GAMMA;
-const C2: f64 = (IXX - IYY + IZZ) * IXZ / GAMMA;
-const C3: f64 = IZZ / GAMMA;
-const C4: f64 = IXZ / GAMMA;
-const C5: f64 = (IZZ - IXX) / IYY;
-const C6: f64 = IXZ / IYY;
-const C7: f64 = ((IXX - IYY) * IXX + IXZ * IXZ) / GAMMA;
-const C8: f64 = IXX / GAMMA;
+/// Aircraft inertial properties passed to the integrators.
+///
+/// Pre-computing the Stevens & Lewis C1–C8 inertia combinations once per
+/// aircraft keeps the EOM inner loop free of divisions.
+#[derive(Debug, Clone, Copy)]
+pub struct MassProps {
+    /// Total aircraft mass (slug).
+    pub mass: f64,
+    // Pre-computed inertia combinations (Stevens & Lewis, eq. 1.4-12).
+    pub c1: f64, pub c2: f64, pub c3: f64, pub c4: f64,
+    pub c5: f64, pub c6: f64, pub c7: f64, pub c8: f64,
+    /// 1 / Iyy (for direct pitch integration).
+    pub inv_iyy: f64,
+}
+
+impl MassProps {
+    /// Construct from raw inertia values.
+    ///
+    /// * `mass` – slug
+    /// * `ixx, iyy, izz, ixz` – slug·ft²
+    pub const fn new(mass: f64, ixx: f64, iyy: f64, izz: f64, ixz: f64) -> Self {
+        let gamma = ixx * izz - ixz * ixz;
+        MassProps {
+            mass,
+            c1: ((iyy - izz) * izz - ixz * ixz) / gamma,
+            c2: (ixx - iyy + izz) * ixz / gamma,
+            c3: izz / gamma,
+            c4: ixz / gamma,
+            c5: (izz - ixx) / iyy,
+            c6: ixz / iyy,
+            c7: ((ixx - iyy) * ixx + ixz * ixz) / gamma,
+            c8: ixx / gamma,
+            inv_iyy: 1.0 / iyy,
+        }
+    }
+}
+
+/// C172p mass properties (convenience constant).
+pub const C172_MASS_PROPS: MassProps = MassProps::new(
+    MASS, IXX, IYY, IZZ, IXZ,
+);
 
 // ── State vector ──────────────────────────────────────────────────────────────
 
@@ -235,7 +266,7 @@ pub struct ExternalLoads {
     pub moment: Vec3,
 }
 
-fn compute_deriv(s: &State, loads: &ExternalLoads) -> Deriv {
+fn compute_deriv(s: &State, loads: &ExternalLoads, mp: &MassProps) -> Deriv {
     let phi   = s.phi;
     let theta = s.theta;
     let psi   = s.psi;
@@ -265,9 +296,9 @@ fn compute_deriv(s: &State, loads: &ExternalLoads) -> Deriv {
 
     // Newton's 2nd law in rotating body frame:
     //   m·u̇ = Fx + m·gx − m·(q·w − r·v)
-    let du = (fx / MASS) + gx - (q * w - r * v);
-    let dv = (fy / MASS) + gy - (r * u - p * w);
-    let dw = (fz / MASS) + gz - (p * v - q * u);
+    let du = (fx / mp.mass) + gx - (q * w - r * v);
+    let dv = (fy / mp.mass) + gy - (r * u - p * w);
+    let dw = (fz / mp.mass) + gz - (p * v - q * u);
 
     // ── Moments ──────────────────────────────────────────────────────────────
     let roll_m  = loads.moment.x; // L
@@ -275,9 +306,9 @@ fn compute_deriv(s: &State, loads: &ExternalLoads) -> Deriv {
     let yaw_m   = loads.moment.z; // N
 
     // Stevens & Lewis eqs. 1.4-12 (general with Ixz coupling)
-    let dp = C1 * r * q + C2 * p * q + C3 * roll_m  + C4 * yaw_m;
-    let dq = C5 * p * r - C6 * (p * p - r * r) + (1.0 / IYY) * pitch_m;
-    let dr = C7 * p * q - C1 * q * r + C4 * roll_m  + C8 * yaw_m;
+    let dp = mp.c1 * r * q + mp.c2 * p * q + mp.c3 * roll_m + mp.c4 * yaw_m;
+    let dq = mp.c5 * p * r - mp.c6 * (p * p - r * r) + mp.inv_iyy * pitch_m;
+    let dr = mp.c7 * p * q - mp.c1 * q * r + mp.c4 * roll_m + mp.c8 * yaw_m;
 
     // ── Euler angle kinematics ────────────────────────────────────────────────
     let dphi   = p + (q * sphi + r * cphi) * ttheta;
@@ -345,7 +376,7 @@ fn update_auxiliary(s: &mut State, prev_alpha: f64, dt: f64) {
 ///
 /// The caller supplies a closure that computes external loads as a function
 /// of the current provisional state (needed for mid-step force evaluations).
-pub fn rk4_step<F>(state: &State, dt: f64, loads_fn: F) -> State
+pub fn rk4_step<F>(state: &State, dt: f64, mp: &MassProps, loads_fn: F) -> State
 where
     F: Fn(&State) -> ExternalLoads,
 {
@@ -353,22 +384,22 @@ where
 
     // k1
     let l1 = loads_fn(state);
-    let d1 = compute_deriv(state, &l1);
+    let d1 = compute_deriv(state, &l1, mp);
 
     // k2
     let s2 = add_state_deriv(state, &d1, dt * 0.5);
     let l2 = loads_fn(&s2);
-    let d2 = compute_deriv(&s2, &l2);
+    let d2 = compute_deriv(&s2, &l2, mp);
 
     // k3
     let s3 = add_state_deriv(state, &d2, dt * 0.5);
     let l3 = loads_fn(&s3);
-    let d3 = compute_deriv(&s3, &l3);
+    let d3 = compute_deriv(&s3, &l3, mp);
 
     // k4
     let s4 = add_state_deriv(state, &d3, dt);
     let l4 = loads_fn(&s4);
-    let d4 = compute_deriv(&s4, &l4);
+    let d4 = compute_deriv(&s4, &l4, mp);
 
     // Weighted average
     let d_avg = scale_deriv(
@@ -402,13 +433,13 @@ where
 }
 
 /// Simple Euler integration (faster, less accurate – useful for sub-steps).
-pub fn euler_step<F>(state: &State, dt: f64, loads_fn: F) -> State
+pub fn euler_step<F>(state: &State, dt: f64, mp: &MassProps, loads_fn: F) -> State
 where
     F: Fn(&State) -> ExternalLoads,
 {
     let prev_alpha = state.alpha;
     let loads = loads_fn(state);
-    let d = compute_deriv(state, &loads);
+    let d = compute_deriv(state, &loads, mp);
     let mut next = add_state_deriv(state, &d, dt);
     next.t = state.t + dt;
     next.psi = next.psi.rem_euclid(2.0 * std::f64::consts::PI);

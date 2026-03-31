@@ -29,13 +29,14 @@ pub mod eom;
 pub mod fcs;
 pub mod math;
 pub mod prop;
+pub mod f35;
 
 pub use eom::State;
 pub use fcs::Controls;
 
 use aero::{AeroIn, WINGSPAN};
 use atmo::atmosphere;
-use eom::{rk4_step, ExternalLoads};
+use eom::{rk4_step, C172_MASS_PROPS, ExternalLoads};
 use fcs::Surfaces;
 use math::Vec3;
 use prop::propulsion;
@@ -75,7 +76,7 @@ impl FlightModel {
             loads(s, &surfs, throttle, prev_alpha, dt)
         };
 
-        let next = rk4_step(&self.state, dt, loads_fn);
+        let next = rk4_step(&self.state, dt, &C172_MASS_PROPS, loads_fn);
 
         // Update alpha-dot tracker
         let alpha_dot = if dt > 0.0 {

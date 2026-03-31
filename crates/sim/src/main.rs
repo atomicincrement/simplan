@@ -34,7 +34,7 @@ fn setup(
     // ── Camera ────────────────────────────────────────────────────────────
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(-30.0, 20.0, 50.0).looking_at(Vec3::new(0.0, 3.0, 0.0), Vec3::Y),
+        Transform::from_xyz(-30.0, 20.0, 350.0).looking_at(Vec3::new(0.0, 3.0, 0.0), Vec3::Y),
     ));
 
     // ── Sun ───────────────────────────────────────────────────────────────
@@ -108,7 +108,7 @@ fn setup(
         &mut commands,
         &mut meshes,
         &mut materials,
-        Vec3::new(0.0, 6.0, 0.0),
+        Vec3::new(0.0, 6.0, 250.0),
     );
 }
 
@@ -184,7 +184,7 @@ fn spawn_aircraft(
             Aircraft,
             RigidBody::Dynamic,
             Collider::cuboid(11.0, 3.5, 11.0),
-            LinearVelocity(Vec3::new(0.0, 0.0, 100.0)),
+            LinearVelocity(Vec3::new(0.0, 0.0, -100.0)),
         ))
         .with_children(|p| {
             // ── Fuselage (main spine) ──────────────────────────────────────
