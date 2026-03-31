@@ -1,10 +1,9 @@
 use avian3d::prelude::*;
-use bevy::input::mouse::{MouseMotion, MouseWheel};
+use bevy::input::mouse::MouseWheel;
 use bevy::math::Affine2;
 use bevy::prelude::*;
 use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::window::CursorGrabMode;
 use bevy_image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use fdm::atmo::atmosphere;
 use fdm::f35::aero::{aerodynamics, AeroIn};
@@ -31,7 +30,7 @@ fn main() {
             color: Color::WHITE,
             brightness: 400.0,
         })
-        .add_systems(Startup, (setup, grab_cursor, setup_hud))
+        .add_systems(Startup, (setup, setup_hud))
         .add_systems(Update, (apply_aerodynamics, mouse_controls, follow_camera, update_hud))
         .run();
 }
@@ -356,15 +355,6 @@ fn spawn_aircraft(
         });
 }
 
-// ── Cursor grab ──────────────────────────────────────────────────────────────
-
-fn grab_cursor(mut window_q: Query<&mut Window>) {
-    if let Ok(mut window) = window_q.get_single_mut() {
-        window.cursor_options.grab_mode = CursorGrabMode::Locked;
-        window.cursor_options.visible = false;
-    }
-}
-
 // ── Following camera ─────────────────────────────────────────────────────────
 //
 // Sits 35 m behind and 8 m above the aircraft in its local frame, looking
@@ -388,21 +378,24 @@ fn follow_camera(
 
 // ── Mouse controls ────────────────────────────────────────────────────────────
 //
-// Mouse Y (up)   → elevator +  (nose up)
-// Mouse X (right) → aileron +  (right wing down / roll right)
-// Escape releases the cursor grab.
+// When the cursor is inside the stick indicator box its position maps directly
+// to elevator (Y) and aileron (X) deflection.  Moving outside centres the stick.
+// Scroll wheel adjusts throttle.  Escape quits.
 
 fn mouse_controls(
-    mut mouse_motion: EventReader<MouseMotion>,
     mut mouse_wheel: EventReader<MouseWheel>,
     mut controls: ResMut<PilotControls>,
     keys: Res<ButtonInput<KeyCode>>,
+    window_q: Query<&Window>,
     mut app_exit: EventWriter<AppExit>,
 ) {
-    const ELEV_SENS: f64 = 0.08;
-    const AIL_SENS:  f64 = 0.08;
-    const MAX_DEF:   f64 = 0.436; // ≈ 25°
+    const MAX_DEF: f64 = 0.436; // ≈ 25°
     const THROTTLE_STEP: f64 = 0.05;
+    // Must match the values in setup_hud.
+    const BOX_W: f32 = 80.0;
+    const BOX_H: f32 = 80.0;
+    const BOX_RIGHT:  f32 = 24.0;
+    const BOX_BOTTOM: f32 = 40.0;
 
     if keys.just_pressed(KeyCode::Escape) {
         app_exit.send(AppExit::Success);
@@ -413,15 +406,33 @@ fn mouse_controls(
             (controls.throttle + ev.y as f64 * THROTTLE_STEP).clamp(0.0, 1.0);
     }
 
-    // Sum deltas this frame; velocity → deflection, springs to centre when still.
-    let mut dx = 0.0_f32;
-    let mut dy = 0.0_f32;
-    for ev in mouse_motion.read() {
-        dx += ev.delta.x;
-        dy += ev.delta.y;
+    let Ok(window) = window_q.get_single() else { return; };
+    let win_w = window.width();
+    let win_h = window.height();
+    // Box top-left in screen coordinates (origin = top-left of window).
+    let box_left = win_w - BOX_RIGHT - BOX_W;
+    let box_top  = win_h - BOX_BOTTOM - BOX_H;
+
+    let inside = window.cursor_position().and_then(|cur| {
+        if cur.x >= box_left && cur.x <= box_left + BOX_W
+            && cur.y >= box_top && cur.y <= box_top + BOX_H
+        {
+            Some(cur)
+        } else {
+            None
+        }
+    });
+
+    if let Some(cur) = inside {
+        // Map 0..BOX to -1..1; invert Y so up = nose-up.
+        let nx = ((cur.x - box_left) / BOX_W * 2.0 - 1.0) as f64;
+        let ny = ((cur.y - box_top)  / BOX_H * 2.0 - 1.0) as f64;
+        controls.aileron  = (nx * MAX_DEF).clamp(-MAX_DEF, MAX_DEF);
+        controls.elevator = (-ny * MAX_DEF).clamp(-MAX_DEF, MAX_DEF);
+    } else {
+        controls.aileron  = 0.0;
+        controls.elevator = 0.0;
     }
-    controls.elevator = (-dy as f64 * ELEV_SENS).clamp(-MAX_DEF, MAX_DEF);
-    controls.aileron  = ( dx as f64 * AIL_SENS ).clamp(-MAX_DEF, MAX_DEF);
 }
 
 // ── HUD ──────────────────────────────────────────────────────────────────────
