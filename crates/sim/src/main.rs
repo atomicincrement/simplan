@@ -7,6 +7,9 @@ use fdm::f35::prop::propulsion;
 use fdm::math::Vec3 as FdmVec3;
 use terrain::TerrainPlugin;
 
+mod sky;
+use sky::{SkyPlugin, SUN_DIR};
+
 // ── Unit-conversion constants (imperial ↔ SI) ────────────────────────────────
 const M_TO_FT: f32 = 3.280_84;
 const LBF_TO_N: f32 = 4.448_22;
@@ -23,11 +26,14 @@ fn main() {
         }))
         .add_plugins(PhysicsPlugins::default())
         .add_plugins(TerrainPlugin)
+        .add_plugins(SkyPlugin)
+        .insert_resource(ClearColor(Color::BLACK))
         .init_resource::<PilotControls>()
         .init_resource::<SimClock>()
         .insert_resource(AmbientLight {
-            color: Color::WHITE,
-            brightness: 400.0,
+            // Dim, slightly blue-warm: scattered morning skylight.
+            color: Color::srgb(0.65, 0.72, 0.90),
+            brightness: 180.0,
         })
         .add_systems(Startup, (setup, setup_hud))
         .add_systems(PhysicsSchedule, apply_aerodynamics.in_set(PhysicsStepSet::First))
@@ -92,25 +98,35 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     // ── Camera ────────────────────────────────────────────────────────────
+    // Far plane set to 5 000 km so the 900 km skydome and distant terrain
+    // tiles are never clipped.
     commands.spawn((
         Camera3d::default(),
+        Projection::Perspective(PerspectiveProjection {
+            near: 0.5,
+            far:  5_000_000.0,
+            ..default()
+        }),
         Transform::from_xyz(-30.0, 20.0, 350.0).looking_at(Vec3::new(0.0, 3.0, 0.0), Vec3::Y),
         FollowCamera,
     ));
 
-    // ── Sun ───────────────────────────────────────────────────────────────
+    // ── Sun (early morning – eastern horizon, ~8° elevation) ─────────────
+    //
+    // Light rays travel in  −SUN_DIR  (from east, angled slightly downward).
+    // DirectionalLight always emits along its local −Z axis, so we rotate
+    // the identity transform so that local −Z = −SUN_DIR.
+    let light_dir = -SUN_DIR.normalize();
+    let sun_rotation = Quat::from_rotation_arc(Vec3::NEG_Z, light_dir);
     commands.spawn((
         DirectionalLight {
-            illuminance: 12_000.0,
+            // Soft, warm orange-gold sunrise illuminance (vs ~100 000 lux at noon).
+            illuminance: 7_500.0,
+            color: Color::srgb(1.0, 0.82, 0.60),
             shadows_enabled: true,
             ..default()
         },
-        Transform::from_rotation(Quat::from_euler(
-            EulerRot::XYZ,
-            -std::f32::consts::FRAC_PI_4,
-            std::f32::consts::FRAC_PI_4,
-            0.0,
-        )),
+        Transform::from_rotation(sun_rotation),
     ));
 
     // ── Ground physics collider (half-space at y = 0) ─────────────────────
