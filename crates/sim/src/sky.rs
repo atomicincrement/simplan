@@ -19,9 +19,10 @@ use bevy::{
 
 // ── Sun direction ─────────────────────────────────────────────────────────────
 //
-// Direction FROM the scene origin TOWARD the sun (east, 8° above horizon).
-// In Bevy's coordinate system: +X = east, +Y = up, −Z = north.
-pub const SUN_DIR: Vec3 = Vec3::new(0.990, 0.141, 0.0);
+// Direction FROM the scene origin TOWARD the sun.
+// NNE direction, ~15° above horizon – squarely in the initial camera view
+// (camera starts looking north along −Z) and low enough for morning colour.
+pub const SUN_DIR: Vec3 = Vec3::new(0.30, 0.27, -0.92);
 
 // ── Dome geometry ─────────────────────────────────────────────────────────────
 const SKY_RADIUS: f32 = 50_000.0;  // 50 km – stays well within float depth precision
@@ -29,9 +30,12 @@ const RINGS:    usize = 48;
 const SECTORS:  usize = 96;
 
 // ── Sun disc ──────────────────────────────────────────────────────────────────
-const SUN_ANG_DEG:  f32 = 0.6;
-const SUN_DISC_R:   f32 = SKY_RADIUS * 0.95 * (SUN_ANG_DEG * PI / 180.0);
-const SUN_SECTORS:  usize = 48;
+// 3° angular radius (real sun is 0.27°; enlarged for clear in-game visibility).
+const SUN_ANG_DEG:  f32 = 3.0;
+// Place disc at 0.90× dome radius so it is clearly in front of the dome surface.
+const SUN_DIST:     f32 = SKY_RADIUS * 0.90;
+const SUN_DISC_R:   f32 = SUN_DIST * (SUN_ANG_DEG * PI / 180.0);
+const SUN_SECTORS:  usize = 64;
 
 // ── Component markers ─────────────────────────────────────────────────────────
 #[derive(Component)]
@@ -207,8 +211,6 @@ fn build_skydome_mesh() -> Mesh {
 }
 
 fn build_sun_disc_mesh() -> Mesh {
-    // Flat circle in the plane perpendicular to SUN_DIR, centred at origin.
-    // Translated into position at spawn time.
     let fwd   = SUN_DIR.normalize();
     let right = Vec3::Y.cross(fwd).normalize();
     let up    = fwd.cross(right).normalize();
@@ -287,7 +289,7 @@ fn setup_sky(
         ..default()
     });
 
-    let sun_pos = SUN_DIR.normalize() * SKY_RADIUS * 0.95;
+    let sun_pos = SUN_DIR.normalize() * SUN_DIST;
     commands.spawn((
         Mesh3d(meshes.add(build_sun_disc_mesh())),
         MeshMaterial3d(sun_mat),
@@ -311,6 +313,6 @@ fn follow_sky(
         t.translation = cam;
     }
     for mut t in sun_q.iter_mut() {
-        t.translation = cam + SUN_DIR.normalize() * SKY_RADIUS * 0.95;
+        t.translation = cam + SUN_DIR.normalize() * SUN_DIST;
     }
 }
