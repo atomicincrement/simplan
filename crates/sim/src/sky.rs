@@ -18,8 +18,7 @@ use bevy::{
         mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology},
         render_asset::RenderAssetUsages,
         render_resource::{
-            AsBindGroup, CompareFunction, RenderPipelineDescriptor,
-            SpecializedMeshPipelineError,
+            AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
         },
     },
 };
@@ -44,7 +43,6 @@ impl MaterialExtension for SkyMatExt {
     ) -> Result<(), SpecializedMeshPipelineError> {
         if let Some(ds) = descriptor.depth_stencil.as_mut() {
             ds.depth_write_enabled = false;
-            ds.depth_compare = CompareFunction::Always;
         }
         Ok(())
     }
