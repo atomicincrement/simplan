@@ -74,6 +74,8 @@ pub struct TerrainState {
     pending_geodata_gen:   u32,
     /// Frames for which pending_geodata_gen has been stable (debounce counter).
     geodata_stable_frames: u32,
+    /// Post-rebuild cooldown: no new rebuild until this reaches 0.
+    rebuild_cooldown:      u32,
 }
 
 // ── Marker component ─────────────────────────────────────────────────────────
@@ -89,6 +91,15 @@ pub struct TerrainBuildTask(pub Task<Mesh>);
 /// to do so — i.e. after any in-flight build task has been resolved.
 #[derive(Component)]
 struct TileDespawnPending;
+
+/// Frame countdown for visible tiles awaiting despawn.  Gives children time to
+/// build so the parent mesh covers the gap until they appear.
+#[derive(Component)]
+struct TileDespawnDelay(u32);
+
+/// Frames a visible parent tile waits before being removed after its children
+/// are spawned.  Should comfortably exceed a typical mesh-build round-trip.
+const TILE_DESPAWN_DELAY_FRAMES: u32 = 120; // ≈ 2 s at 60 fps
 
 // ── Debug state ──────────────────────────────────────────────────────────────
 
@@ -123,11 +134,12 @@ fn setup_terrain(
     });
 
     commands.insert_resource(TerrainState {
-        tree:                 QuadTree::new(),
+        tree:                  QuadTree::new(),
         material,
-        last_geodata_gen:     0,
-        pending_geodata_gen:  0,
+        last_geodata_gen:      0,
+        pending_geodata_gen:   0,
         geodata_stable_frames: 0,
+        rebuild_cooldown:      0,
     });
 }
 
@@ -148,10 +160,8 @@ fn update_terrain(
     for op in ops {
         match op {
             DeltaOp::Despawn(entity) => {
-                // Don't despawn immediately — the entity may still have a
-                // TerrainBuildTask in flight.  Mark it and let
-                // poll_terrain_tasks / despawn_stale_tiles resolve it safely.
-                commands.entity(entity).insert(TileDespawnPending);
+                // Keep visible mesh alive while children/parent builds, preventing gaps.
+                commands.entity(entity).insert((TileDespawnPending, TileDespawnDelay(TILE_DESPAWN_DELAY_FRAMES)));
             }
             DeltaOp::Spawn { cx, cz, half, slot } => {
                 let cfg_clone = cfg.clone();
@@ -193,20 +203,34 @@ fn poll_terrain_tasks(
     }
 }
 
-/// Despawn tile entities that have been marked for removal and are no longer
-/// waiting on a build task.
+/// Despawn tile entities that have been marked for removal.
+///
+/// * Orphaned build tasks (no mesh yet) — removed immediately.
+/// * Visible tile meshes (TerrainTile) — kept alive for TILE_DESPAWN_DELAY_FRAMES
+///   so the parent mesh bridges the gap while child tiles finish building.
 fn despawn_stale_tiles(
     mut commands: Commands,
-    query:        Query<Entity, (With<TileDespawnPending>, Without<TerrainBuildTask>)>,
+    // Orphaned tasks: despawn now.
+    tasks:   Query<Entity, (With<TileDespawnPending>, Without<TerrainBuildTask>, Without<TerrainTile>)>,
+    // Visible tiles: count down then despawn.
+    mut visible: Query<(Entity, &mut TileDespawnDelay), (With<TileDespawnPending>, Without<TerrainBuildTask>, With<TerrainTile>)>,
 ) {
-    for entity in query.iter() {
+    for entity in tasks.iter() {
         commands.entity(entity).despawn_recursive();
+    }
+    for (entity, mut delay) in visible.iter_mut() {
+        if delay.0 == 0 {
+            commands.entity(entity).despawn_recursive();
+        } else {
+            delay.0 -= 1;
+        }
     }
 }
 
-/// How many consecutive frames fetch_count must be unchanged before we
-/// rebuild the terrain.  Prevents a reset→fetch→reset cascade.
-const GEODATA_DEBOUNCE_FRAMES: u32 = 30; // ≈ 0.5 s at 60 fps
+/// Consecutive stable frames required before a rebuild is triggered.
+const GEODATA_DEBOUNCE_FRAMES: u32 = 120; // ≈ 2 s at 60 fps
+/// Minimum frames between successive tree rebuilds.
+const REBUILD_COOLDOWN_FRAMES: u32 = 300; // ≈ 5 s at 60 fps
 
 /// When new elevation tiles have been loaded into the GeoCache, reset the
 /// quad-tree so all tiles rebuild with real heights.  Only fires once the
@@ -217,41 +241,44 @@ fn watch_geodata_loads(
     mut commands: Commands,
     building:     Query<&TerrainBuildTask>,
 ) {
+    // Enforce post-rebuild cooldown.
+    if state.rebuild_cooldown > 0 {
+        state.rebuild_cooldown -= 1;
+        return;
+    }
+
     let Some(ref cache) = cfg.geo_cache else { return; };
     let current = cache.fetch_count();
 
     if current == state.last_geodata_gen {
-        // Nothing new since the last rebuild.
         state.geodata_stable_frames = 0;
         return;
     }
 
     if current != state.pending_geodata_gen {
-        // New tiles just landed — reset the debounce counter.
         state.pending_geodata_gen   = current;
         state.geodata_stable_frames = 0;
         return;
     }
 
-    // fetch_count has been stable for another frame.
     state.geodata_stable_frames += 1;
     if state.geodata_stable_frames < GEODATA_DEBOUNCE_FRAMES {
         return;
     }
 
-    // Don't rebuild while tile meshes are still being built — ensures the
-    // initial flat tiles are visible before the first real-height rebuild.
+    // Don't rebuild while tile meshes are still being built.
     if !building.is_empty() {
         return;
     }
 
-    // Stable and idle — rebuild with real heights.
+    // Stable, idle, and cooled down — rebuild with real heights.
     state.last_geodata_gen      = current;
     state.geodata_stable_frames = 0;
+    state.rebuild_cooldown      = REBUILD_COOLDOWN_FRAMES;
 
     for op in state.tree.reset() {
         if let crate::quadtree::DeltaOp::Despawn(e) = op {
-            commands.entity(e).insert(TileDespawnPending);
+            commands.entity(e).insert((TileDespawnPending, TileDespawnDelay(TILE_DESPAWN_DELAY_FRAMES)));
         }
     }
 }
