@@ -1,5 +1,7 @@
 # Simplan
 
+![Simplan screenshot](doc/simplan1.png)
+
 A 3-D flight simulator built with [Bevy](https://bevyengine.org/) (v0.15) and a custom flight-dynamics model (FDM) based on the JSBSim equations of motion.
 
 Features:
