@@ -49,25 +49,30 @@ fn lerp_col(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
 }
 
 fn altitude_color(y: f32, hs: f32) -> [f32; 4] {
-    let t = y / hs; // normalised; -1 → 1
-    const DEEP:    [f32; 4] = [0.04, 0.11, 0.38, 1.0];
-    const SHALLOW: [f32; 4] = [0.12, 0.32, 0.62, 1.0];
+    let t = y / hs; // normalised 0 → 1 (heights below sea level are clamped to 0)
+    const OCEAN:   [f32; 4] = [0.04, 0.18, 0.48, 1.0];
+    const SHALLOW: [f32; 4] = [0.10, 0.38, 0.65, 1.0];
     const BEACH:   [f32; 4] = [0.82, 0.76, 0.56, 1.0];
     const PASTURE: [f32; 4] = [0.22, 0.52, 0.18, 1.0];
     const ROCK:    [f32; 4] = [0.46, 0.43, 0.38, 1.0];
     const SNOW:    [f32; 4] = [0.95, 0.95, 0.98, 1.0];
-    if t < -0.05 {
-        lerp_col(DEEP,    SHALLOW, (t + 1.0) / 0.95)
-    } else if t < 0.0 {
-        lerp_col(SHALLOW, BEACH,   (t + 0.05) / 0.05)
-    } else if t < 0.10 {
-        lerp_col(BEACH,   PASTURE,  t / 0.10)
+    if t < 0.005 {
+        // Flat sea – ocean blue.
+        lerp_col(OCEAN, SHALLOW, t / 0.005)
+    } else if t < 0.02 {
+        // Shallow water → sandy beach.
+        lerp_col(SHALLOW, BEACH, (t - 0.005) / 0.015)
+    } else if t < 0.05 {
+        // Beach → pasture.
+        lerp_col(BEACH, PASTURE, (t - 0.02) / 0.03)
     } else if t < 0.50 {
-        lerp_col(PASTURE, ROCK,    (t - 0.10) / 0.40)
+        // Pasture → rock.
+        lerp_col(PASTURE, ROCK, (t - 0.05) / 0.45)
     } else if t < 0.80 {
-        lerp_col(ROCK,    ROCK,    (t - 0.50) / 0.30)
+        ROCK
     } else {
-        lerp_col(ROCK,    SNOW,    (t - 0.80) / 0.20)
+        // Rock → snow.
+        lerp_col(ROCK, SNOW, (t - 0.80) / 0.20)
     }
 }
 
@@ -87,10 +92,11 @@ pub fn build_tile_mesh(cx: f32, cz: f32, half: f32, cfg: &TerrainConfig) -> Mesh
     let mut uvs       = Vec::with_capacity(total_verts);
 
     // Helper: sample height at arbitrary flat (fx, fz).
+    // Clamped to >= 0 so that below-sea-level noise produces flat water.
     let height = |fx: f32, fz: f32| -> f32 {
         let sp = project(fx, fz);
         let n = sp.normal;
-        fbm3(
+        (fbm3(
             n[0] * cfg.noise_frequency,
             n[1] * cfg.noise_frequency,
             n[2] * cfg.noise_frequency,
@@ -98,7 +104,7 @@ pub fn build_tile_mesh(cx: f32, cz: f32, half: f32, cfg: &TerrainConfig) -> Mesh
             cfg.noise_octaves,
             2.0,
             0.5,
-        ) * cfg.height_scale
+        ) * cfg.height_scale).max(0.0)
     };
 
     // Helper: world position of vertex at flat (fx, fz).
@@ -182,8 +188,8 @@ pub fn terrain_height_at(fx: f32, fz: f32, cfg: &TerrainConfig) -> f32 {
         2.0,
         0.5,
     );
-    // Sphere surface y  +  noise displacement in y direction.
-    sp.position[1] + sp.normal[1] * noise * cfg.height_scale
+    // Sphere surface y + noise displacement (clamped to sea level).
+    sp.position[1] + sp.normal[1] * (noise * cfg.height_scale).max(0.0)
 }
 
 
