@@ -263,12 +263,13 @@ fn setup_sky(
     mut meshes:   ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Skydome: unlit so scene lighting doesn't affect it; vertex colours carry
-    // all visual information.  Flipped winding means default back-face culling
-    // shows the interior correctly.
+    // Skydome: unlit, double-sided (disables face-cull so the interior is
+    // always visible regardless of winding), vertex colours carry all the sky
+    // colour information.
     let sky_mat = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         unlit: true,
+        double_sided: true,
         fog_enabled: false,
         ..default()
     });
