@@ -357,7 +357,8 @@ fn mouse_controls(
     const BOX_H: f32 = 80.0;
     const BOX_RIGHT: f32 = 24.0;
     const BOX_BOTTOM: f32 = 40.0;
-    const MAX_DEF: f64 = 0.0872; // ≈ 5° max deflection (rad) — 5× reduced sensitivity
+    const MAX_AIL_DEF:  f64 = 0.3491; // ≈ 20° aileron  — matches FDM AIL_MAX_DEG
+    const MAX_ELEV_DEF: f64 = 0.1745; // ≈ 10° elevator — comfortable pitch authority
 
     if keys.just_pressed(KeyCode::Escape) {
         app_exit.send(AppExit::Success);
@@ -383,8 +384,8 @@ fn mouse_controls(
                     // Normalize to [-1, 1]; Y is inverted (screen down = pitch nose down).
                     let nx = ((rel_x / BOX_W) * 2.0 - 1.0) as f64;
                     let ny = -(((rel_y / BOX_H) * 2.0 - 1.0) as f64);
-                    controls.aileron  = (nx * MAX_DEF).clamp(-MAX_DEF, MAX_DEF);
-                    controls.elevator = (ny * MAX_DEF).clamp(-MAX_DEF, MAX_DEF);
+                    controls.aileron  = (nx * MAX_AIL_DEF).clamp(-MAX_AIL_DEF, MAX_AIL_DEF);
+                    controls.elevator = (ny * MAX_ELEV_DEF).clamp(-MAX_ELEV_DEF, MAX_ELEV_DEF);
                     return;
                 }
             }
@@ -597,9 +598,8 @@ fn update_hud(
 
     // Stick dot position in the 80×80 box (usable range 0–72 with 8 px dot).
     if let Ok(mut node) = stick_q.get_single_mut() {
-        const MAX_DEF: f64 = 0.0872;
-        let ail  = (controls.aileron  / MAX_DEF) as f32;
-        let elev = (controls.elevator / MAX_DEF) as f32;
+        let ail  = (controls.aileron  / 0.3491) as f32;
+        let elev = (controls.elevator / 0.1745) as f32;
         let cx = (36.0 + ail  * 36.0).clamp(0.0, 72.0);
         let cy = (36.0 - elev * 36.0).clamp(0.0, 72.0);
         node.left = Val::Px(cx);
