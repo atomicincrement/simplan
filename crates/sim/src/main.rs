@@ -119,7 +119,7 @@ fn setup(
     // ── Ground (checkerboard, 100 m squares via tiled 2×2 texture) ─────────
     //
     // The 2×2 image encodes one checker cycle (light/dark).
-    // UV scale = 50 ⇒ 50 full cycles × 200 m/cycle = 10 000 m.
+    // UV scale = 5000 ⇒ 5000 full cycles × 200 m/cycle = 1 000 000 m.
     let light = [56u8, 122, 41, 255];
     let dark  = [41u8,  92, 28, 255];
     #[rustfmt::skip]
@@ -141,16 +141,29 @@ fn setup(
     let checker_tex = images.add(checker_img);
     let ground_mat = materials.add(StandardMaterial {
         base_color_texture: Some(checker_tex),
-        uv_transform: Affine2::from_scale(Vec2::splat(50.0)),
+        uv_transform: Affine2::from_scale(Vec2::splat(5000.0)),
         perceptual_roughness: 1.0,
         ..default()
     });
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(10_000.0, 10_000.0).subdivisions(64))),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(1_000_000.0, 1_000_000.0).subdivisions(4))),
         MeshMaterial3d(ground_mat),
         Transform::default(),
         RigidBody::Static,
         Collider::half_space(Vec3::Y),
+    ));
+
+    // ── Mountain (3 km peak, 10 km north of runway along –Z) ─────────────
+    let mountain_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.52, 0.49, 0.45),
+        perceptual_roughness: 1.0,
+        ..default()
+    });
+    commands.spawn((
+        Mesh3d(meshes.add(Cone { radius: 2_000.0, height: 3_000.0 })),
+        MeshMaterial3d(mountain_mat),
+        // Cone origin is at its centre; shift up by half height so base sits on y=0.
+        Transform::from_xyz(0.0, 1_500.0, -10_000.0),
     ));
 
     // ── Runway ────────────────────────────────────────────────────────────
