@@ -21,6 +21,7 @@ pub mod tile_mesh;
 pub mod quadtree;
 
 use bevy::{
+    pbr::wireframe::{Wireframe, WireframePlugin},
     prelude::*,
     tasks::{futures_lite::future, AsyncComputeTaskPool, Task},
 };
@@ -89,15 +90,24 @@ pub struct TerrainBuildTask(pub Task<Mesh>);
 #[derive(Component)]
 struct TileDespawnPending;
 
+// ── Debug state ──────────────────────────────────────────────────────────────
+
+#[derive(Resource, Default)]
+pub struct TerrainDebug {
+    pub wireframe: bool,
+}
+
 // ── Plugin ───────────────────────────────────────────────────────────────────
 
 pub struct TerrainPlugin;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<TerrainConfig>()
+        app.add_plugins(WireframePlugin)
+            .init_resource::<TerrainConfig>()
+            .init_resource::<TerrainDebug>()
             .add_systems(Startup, setup_terrain)
-            .add_systems(Update, (update_terrain, poll_terrain_tasks, despawn_stale_tiles, watch_geodata_loads));
+            .add_systems(Update, (update_terrain, poll_terrain_tasks, despawn_stale_tiles, watch_geodata_loads, toggle_wireframe));
     }
 }
 
@@ -157,6 +167,7 @@ fn update_terrain(
 /// Promote completed mesh-build tasks to full tile entities.
 fn poll_terrain_tasks(
     state:        Res<TerrainState>,
+    debug:        Res<TerrainDebug>,
     mut commands: Commands,
     mut meshes:   ResMut<Assets<Mesh>>,
     mut query:    Query<(Entity, &mut TerrainBuildTask, Option<&TileDespawnPending>)>,
@@ -167,15 +178,16 @@ fn poll_terrain_tasks(
                 // The tile slot was evicted before the mesh finished — discard.
                 commands.entity(entity).despawn_recursive();
             } else {
-                commands
-                    .entity(entity)
-                    .remove::<TerrainBuildTask>()
-                    .insert((
-                        Mesh3d(meshes.add(mesh)),
-                        MeshMaterial3d(state.material.clone()),
-                        Transform::default(),
-                        TerrainTile,
-                    ));
+                let mut ec = commands.entity(entity);
+                ec.remove::<TerrainBuildTask>().insert((
+                    Mesh3d(meshes.add(mesh)),
+                    MeshMaterial3d(state.material.clone()),
+                    Transform::default(),
+                    TerrainTile,
+                ));
+                if debug.wireframe {
+                    ec.insert(Wireframe);
+                }
             }
         }
     }
@@ -197,11 +209,13 @@ fn despawn_stale_tiles(
 const GEODATA_DEBOUNCE_FRAMES: u32 = 30; // ≈ 0.5 s at 60 fps
 
 /// When new elevation tiles have been loaded into the GeoCache, reset the
-/// quad-tree so all tiles rebuild with real heights.
+/// quad-tree so all tiles rebuild with real heights.  Only fires once the
+/// tile build queue is empty so initial flat tiles are always visible first.
 fn watch_geodata_loads(
     cfg:          Res<TerrainConfig>,
     mut state:    ResMut<TerrainState>,
     mut commands: Commands,
+    building:     Query<&TerrainBuildTask>,
 ) {
     let Some(ref cache) = cfg.geo_cache else { return; };
     let current = cache.fetch_count();
@@ -225,13 +239,40 @@ fn watch_geodata_loads(
         return;
     }
 
-    // Stable long enough — rebuild with real heights.
-    state.last_geodata_gen     = current;
+    // Don't rebuild while tile meshes are still being built — ensures the
+    // initial flat tiles are visible before the first real-height rebuild.
+    if !building.is_empty() {
+        return;
+    }
+
+    // Stable and idle — rebuild with real heights.
+    state.last_geodata_gen      = current;
     state.geodata_stable_frames = 0;
 
     for op in state.tree.reset() {
         if let crate::quadtree::DeltaOp::Despawn(e) = op {
             commands.entity(e).insert(TileDespawnPending);
+        }
+    }
+}
+
+/// Ctrl+D toggles wireframe overlay on all terrain tiles.
+fn toggle_wireframe(
+    keys:         Res<ButtonInput<KeyCode>>,
+    mut debug:    ResMut<TerrainDebug>,
+    mut commands: Commands,
+    tiles:        Query<Entity, With<TerrainTile>>,
+) {
+    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    if !(keys.just_pressed(KeyCode::KeyD) && ctrl) {
+        return;
+    }
+    debug.wireframe = !debug.wireframe;
+    for entity in tiles.iter() {
+        if debug.wireframe {
+            commands.entity(entity).insert(Wireframe);
+        } else {
+            commands.entity(entity).remove::<Wireframe>();
         }
     }
 }
