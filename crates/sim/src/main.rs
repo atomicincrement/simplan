@@ -1,9 +1,11 @@
 use avian3d::prelude::*;
 use bevy::input::mouse::MouseWheel;
-use bevy::pbr::{MaterialPlugin, Material};
+use bevy::math::Affine2;
 use bevy::prelude::*;
-use bevy::render::render_resource::{AsBindGroup, ShaderRef};
+use bevy::render::render_asset::RenderAssetUsages;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::window::CursorGrabMode;
+use bevy_image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use fdm::atmo::atmosphere;
 use fdm::f35::aero::{aerodynamics, AeroIn};
 use fdm::f35::prop::propulsion;
@@ -24,7 +26,6 @@ fn main() {
             ..default()
         }))
         .add_plugins(PhysicsPlugins::default())
-        .add_plugins(MaterialPlugin::<CheckerMaterial>::default())
         .init_resource::<PilotControls>()
         .insert_resource(AmbientLight {
             color: Color::WHITE,
@@ -48,17 +49,6 @@ struct FollowCamera;
 #[derive(Component)] struct CompassDisplay;
 #[derive(Component)] struct StickDot;
 #[derive(Component)] struct AltimeterDisplay;
-
-// ── Checkerboard ground material ─────────────────────────────────────────────
-
-#[derive(Asset, TypePath, AsBindGroup, Clone, Default)]
-struct CheckerMaterial {}
-
-impl Material for CheckerMaterial {
-    fn fragment_shader() -> ShaderRef {
-        "shaders/checker.wgsl".into()
-    }
-}
 
 // ── Pilot inputs ─────────────────────────────────────────────────────────────
 
@@ -91,7 +81,7 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut checker_materials: ResMut<Assets<CheckerMaterial>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     // ── Camera ────────────────────────────────────────────────────────────
     commands.spawn((
@@ -115,10 +105,38 @@ fn setup(
         )),
     ));
 
-    // ── Ground (checkerboard, 100 m squares) ─────────────────────────────
+    // ── Ground (checkerboard, 100 m squares via tiled 2×2 texture) ─────────
+    //
+    // The 2×2 image encodes one checker cycle (light/dark).
+    // UV scale = 50 ⇒ 50 full cycles × 200 m/cycle = 10 000 m.
+    let light = [56u8, 122, 41, 255];
+    let dark  = [41u8,  92, 28, 255];
+    #[rustfmt::skip]
+    let px: Vec<u8> = [light, dark, dark, light].into_iter().flatten().collect();
+    let mut checker_img = Image::new(
+        Extent3d { width: 2, height: 2, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        px,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    checker_img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        mag_filter: ImageFilterMode::Nearest,
+        min_filter: ImageFilterMode::Nearest,
+        ..default()
+    });
+    let checker_tex = images.add(checker_img);
+    let ground_mat = materials.add(StandardMaterial {
+        base_color_texture: Some(checker_tex),
+        uv_transform: Affine2::from_scale(Vec2::splat(50.0)),
+        perceptual_roughness: 1.0,
+        ..default()
+    });
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(10_000.0, 10_000.0).subdivisions(8))),
-        MeshMaterial3d(checker_materials.add(CheckerMaterial::default())),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(10_000.0, 10_000.0).subdivisions(64))),
+        MeshMaterial3d(ground_mat),
         Transform::default(),
         RigidBody::Static,
         Collider::half_space(Vec3::Y),
