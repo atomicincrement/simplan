@@ -1,3 +1,4 @@
+use avian3d::prelude::*;
 use bevy::prelude::*;
 
 fn main() {
@@ -9,6 +10,7 @@ fn main() {
             }),
             ..default()
         }))
+        .add_plugins(PhysicsPlugins::default())
         .insert_resource(AmbientLight {
             color: Color::WHITE,
             brightness: 400.0,
@@ -60,6 +62,8 @@ fn setup(
         Mesh3d(meshes.add(Plane3d::default().mesh().size(800.0, 800.0))),
         MeshMaterial3d(ground_mat),
         Transform::default(),
+        RigidBody::Static,
+        Collider::half_space(Vec3::Y),
     ));
 
     // ── Runway ────────────────────────────────────────────────────────────
@@ -171,11 +175,16 @@ fn spawn_aircraft(
         };
     }
 
+    // Bounding box that broadly covers the F-35 model:
+    //   wingspan ≈ 11 m  |  height ≈ 3.5 m  |  length ≈ 11 m
     commands
         .spawn((
             Transform::from_translation(position),
             Visibility::default(),
             Aircraft,
+            RigidBody::Dynamic,
+            Collider::cuboid(11.0, 3.5, 11.0),
+            LinearVelocity(Vec3::new(0.0, 0.0, 100.0)),
         ))
         .with_children(|p| {
             // ── Fuselage (main spine) ──────────────────────────────────────
