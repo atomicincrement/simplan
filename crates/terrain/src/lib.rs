@@ -67,9 +67,12 @@ impl Default for TerrainConfig {
 pub struct TerrainState {
     pub tree:              QuadTree,
     pub material:          Handle<StandardMaterial>,
-    /// Last value of GeoCache::fetch_count() we acted on.
-    /// When the cache reports a higher count, all tiles are rebuilt.
+    /// Last value of GeoCache::fetch_count() that triggered a tree rebuild.
     pub last_geodata_gen:  u32,
+    /// Most recently observed fetch_count (may be ahead of last_geodata_gen).
+    pending_geodata_gen:   u32,
+    /// Frames for which pending_geodata_gen has been stable (debounce counter).
+    geodata_stable_frames: u32,
 }
 
 // ── Marker component ─────────────────────────────────────────────────────────
@@ -110,9 +113,11 @@ fn setup_terrain(
     });
 
     commands.insert_resource(TerrainState {
-        tree:             QuadTree::new(),
+        tree:                 QuadTree::new(),
         material,
-        last_geodata_gen: 0,
+        last_geodata_gen:     0,
+        pending_geodata_gen:  0,
+        geodata_stable_frames: 0,
     });
 }
 
@@ -187,6 +192,10 @@ fn despawn_stale_tiles(
     }
 }
 
+/// How many consecutive frames fetch_count must be unchanged before we
+/// rebuild the terrain.  Prevents a reset→fetch→reset cascade.
+const GEODATA_DEBOUNCE_FRAMES: u32 = 30; // ≈ 0.5 s at 60 fps
+
 /// When new elevation tiles have been loaded into the GeoCache, reset the
 /// quad-tree so all tiles rebuild with real heights.
 fn watch_geodata_loads(
@@ -195,14 +204,31 @@ fn watch_geodata_loads(
     mut commands: Commands,
 ) {
     let Some(ref cache) = cfg.geo_cache else { return; };
-    let new_gen = cache.fetch_count();
-    if new_gen <= state.last_geodata_gen {
+    let current = cache.fetch_count();
+
+    if current == state.last_geodata_gen {
+        // Nothing new since the last rebuild.
+        state.geodata_stable_frames = 0;
         return;
     }
-    state.last_geodata_gen = new_gen;
 
-    // Despawn all existing tiles and reset the tree; update_terrain will
-    // re-spawn everything fresh using the newly cached elevation data.
+    if current != state.pending_geodata_gen {
+        // New tiles just landed — reset the debounce counter.
+        state.pending_geodata_gen   = current;
+        state.geodata_stable_frames = 0;
+        return;
+    }
+
+    // fetch_count has been stable for another frame.
+    state.geodata_stable_frames += 1;
+    if state.geodata_stable_frames < GEODATA_DEBOUNCE_FRAMES {
+        return;
+    }
+
+    // Stable long enough — rebuild with real heights.
+    state.last_geodata_gen     = current;
+    state.geodata_stable_frames = 0;
+
     for op in state.tree.reset() {
         if let crate::quadtree::DeltaOp::Despawn(e) = op {
             commands.entity(e).insert(TileDespawnPending);
