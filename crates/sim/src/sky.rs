@@ -9,13 +9,48 @@
 use std::f32::consts::PI;
 
 use bevy::{
-    pbr::{NotShadowCaster, NotShadowReceiver},
+    pbr::{
+        ExtendedMaterial, MaterialExtension, MaterialExtensionKey,
+        MaterialExtensionPipeline, MaterialPlugin, NotShadowCaster, NotShadowReceiver,
+    },
     prelude::*,
     render::{
-        mesh::{Indices, PrimitiveTopology},
+        mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology},
         render_asset::RenderAssetUsages,
+        render_resource::{
+            AsBindGroup, CompareFunction, RenderPipelineDescriptor,
+            SpecializedMeshPipelineError,
+        },
     },
 };
+
+// ── Sky material: StandardMaterial + depth-off extension ──────────────────────
+//
+// `depth_write_enabled = false` means the sky never occludes anything.
+// `depth_compare = Always`     means the fragments always pass the depth test
+//                               (sky renders even if something is "in front").
+//
+// Both are required for a correct, artefact-free skydome.
+
+#[derive(Asset, AsBindGroup, TypePath, Clone, Default)]
+struct SkyMatExt {}
+
+impl MaterialExtension for SkyMatExt {
+    fn specialize(
+        _pipeline: &MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialExtensionKey<SkyMatExt>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        if let Some(ds) = descriptor.depth_stencil.as_mut() {
+            ds.depth_write_enabled = false;
+            ds.depth_compare = CompareFunction::Always;
+        }
+        Ok(())
+    }
+}
+
+type SkyMaterial = ExtendedMaterial<StandardMaterial, SkyMatExt>;
 
 // ── Sun direction ─────────────────────────────────────────────────────────────
 //
@@ -49,7 +84,8 @@ pub struct SkyPlugin;
 
 impl Plugin for SkyPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_sky)
+        app.add_plugins(MaterialPlugin::<SkyMaterial>::default())
+            .add_systems(Startup, setup_sky)
             .add_systems(Update, follow_sky);
     }
 }
@@ -258,17 +294,20 @@ fn build_sun_disc_mesh() -> Mesh {
 
 fn setup_sky(
     mut commands: Commands,
-    mut meshes:   ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut meshes:    ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<SkyMaterial>>,
 ) {
-    // Skydome: unlit, cull disabled, vertex colours carry the Rayleigh/Mie sky.
-    let sky_mat = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
-        unlit: true,
-        double_sided: true,
-        cull_mode: None,
-        fog_enabled: false,
-        ..default()
+    // Skydome: unlit, depth test+write disabled, vertex colours carry the sky.
+    let sky_mat = materials.add(SkyMaterial {
+        base: StandardMaterial {
+            base_color: Color::WHITE,
+            unlit: true,
+            double_sided: true,
+            cull_mode: None,
+            fog_enabled: false,
+            ..default()
+        },
+        extension: SkyMatExt {},
     });
 
     commands.spawn((
@@ -280,13 +319,17 @@ fn setup_sky(
         NotShadowReceiver,
     ));
 
-    // Sun disc: bright, unlit, no culling so it's visible from both sides.
-    let sun_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.92, 0.65),
-        unlit: true,
-        double_sided: true,
-        fog_enabled: false,
-        ..default()
+    // Sun disc: bright, unlit, depth test+write disabled.
+    let sun_mat = materials.add(SkyMaterial {
+        base: StandardMaterial {
+            base_color: Color::srgb(1.0, 0.92, 0.65),
+            unlit: true,
+            double_sided: true,
+            cull_mode: None,
+            fog_enabled: false,
+            ..default()
+        },
+        extension: SkyMatExt {},
     });
 
     let sun_pos = SUN_DIR.normalize() * SUN_DIST;
