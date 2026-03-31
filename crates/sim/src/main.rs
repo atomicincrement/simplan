@@ -1,6 +1,8 @@
 use avian3d::prelude::*;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
+use bevy::pbr::{MaterialPlugin, Material};
 use bevy::prelude::*;
+use bevy::render::render_resource::{AsBindGroup, ShaderRef};
 use bevy::window::CursorGrabMode;
 use fdm::atmo::atmosphere;
 use fdm::f35::aero::{aerodynamics, AeroIn};
@@ -22,6 +24,7 @@ fn main() {
             ..default()
         }))
         .add_plugins(PhysicsPlugins::default())
+        .add_plugins(MaterialPlugin::<CheckerMaterial>::default())
         .init_resource::<PilotControls>()
         .insert_resource(AmbientLight {
             color: Color::WHITE,
@@ -44,6 +47,18 @@ struct FollowCamera;
 #[derive(Component)] struct ThrottleFill;
 #[derive(Component)] struct CompassDisplay;
 #[derive(Component)] struct StickDot;
+#[derive(Component)] struct AltimeterDisplay;
+
+// ── Checkerboard ground material ─────────────────────────────────────────────
+
+#[derive(Asset, TypePath, AsBindGroup, Clone, Default)]
+struct CheckerMaterial {}
+
+impl Material for CheckerMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/checker.wgsl".into()
+    }
+}
 
 // ── Pilot inputs ─────────────────────────────────────────────────────────────
 
@@ -76,6 +91,7 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut checker_materials: ResMut<Assets<CheckerMaterial>>,
 ) {
     // ── Camera ────────────────────────────────────────────────────────────
     commands.spawn((
@@ -99,15 +115,10 @@ fn setup(
         )),
     ));
 
-    // ── Ground ────────────────────────────────────────────────────────────
-    let ground_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.22, 0.48, 0.16),
-        perceptual_roughness: 1.0,
-        ..default()
-    });
+    // ── Ground (checkerboard, 100 m squares) ─────────────────────────────
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(10_000.0, 10_000.0))),
-        MeshMaterial3d(ground_mat),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(10_000.0, 10_000.0).subdivisions(8))),
+        MeshMaterial3d(checker_materials.add(CheckerMaterial::default())),
         Transform::default(),
         RigidBody::Static,
         Collider::half_space(Vec3::Y),
@@ -425,11 +436,24 @@ fn setup_hud(mut commands: Commands) {
                 Node {
                     position_type: PositionType::Absolute,
                     top: Val::Px(14.0),
-                    // centre horizontally with a negative margin trick
                     left: Val::Percent(50.0),
                     ..default()
                 },
                 CompassDisplay,
+            ));
+
+            // ── Altimeter ───────────────────────────────────────────────────────────────
+            root.spawn((
+                Text::new("ALT 00000 ft"),
+                TextFont { font_size: 20.0, ..default() },
+                TextColor(Color::srgba(0.1, 1.0, 0.4, 0.95)),
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(40.0),
+                    left: Val::Percent(50.0),
+                    ..default()
+                },
+                AltimeterDisplay,
             ));
 
             // ── Throttle bar container ─────────────────────────────────────
@@ -547,6 +571,7 @@ fn update_hud(
     aircraft_q: Query<&Transform, With<Aircraft>>,
     mut throttle_q: Query<&mut Node, (With<ThrottleFill>, Without<StickDot>)>,
     mut compass_q: Query<&mut Text, With<CompassDisplay>>,
+    mut altimeter_q: Query<&mut Text, (With<AltimeterDisplay>, Without<CompassDisplay>)>,
     mut stick_q: Query<&mut Node, (With<StickDot>, Without<ThrottleFill>)>,
 ) {
     // Throttle fill height.
@@ -554,25 +579,27 @@ fn update_hud(
         node.height = Val::Percent((controls.throttle * 100.0) as f32);
     }
 
-    // Compass heading from aircraft forward direction.
-    if let (Ok(xform), Ok(mut text)) =
-        (aircraft_q.get_single(), compass_q.get_single_mut())
-    {
+    if let Ok(xform) = aircraft_q.get_single() {
         let fwd = xform.rotation * Vec3::NEG_Z;
-        // atan2(x, -z) gives CW heading from north (−Z world).
         let hdg = (f32::atan2(fwd.x, -fwd.z).to_degrees() + 360.0) % 360.0;
-        **text = format!("HDG {:03.0}°", hdg);
+        if let Ok(mut text) = compass_q.get_single_mut() {
+            **text = format!("HDG {:03.0}°", hdg);
+        }
+        let alt_ft = xform.translation.y * M_TO_FT;
+        if let Ok(mut text) = altimeter_q.get_single_mut() {
+            **text = format!("ALT {:5.0} ft", alt_ft);
+        }
     }
 
     // Stick dot position in the 80×80 box (usable range 0–72 with 8 px dot).
     if let Ok(mut node) = stick_q.get_single_mut() {
         const MAX_DEF: f64 = 0.436;
-        let ail = (controls.aileron / MAX_DEF) as f32;  // –1..1
-        let elev = (controls.elevator / MAX_DEF) as f32; // –1..1
-        let cx = (36.0 + ail * 36.0).clamp(0.0, 72.0);
-        let cy = (36.0 - elev * 36.0).clamp(0.0, 72.0); // up = smaller top
+        let ail  = (controls.aileron  / MAX_DEF) as f32;
+        let elev = (controls.elevator / MAX_DEF) as f32;
+        let cx = (36.0 + ail  * 36.0).clamp(0.0, 72.0);
+        let cy = (36.0 - elev * 36.0).clamp(0.0, 72.0);
         node.left = Val::Px(cx);
-        node.top = Val::Px(cy);
+        node.top  = Val::Px(cy);
     }
 }
 
