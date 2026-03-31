@@ -1,5 +1,5 @@
 use avian3d::prelude::*;
-use bevy::input::mouse::MouseMotion;
+use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
 use bevy::window::CursorGrabMode;
 use fdm::atmo::atmosphere;
@@ -27,8 +27,8 @@ fn main() {
             color: Color::WHITE,
             brightness: 400.0,
         })
-        .add_systems(Startup, (setup, grab_cursor))
-        .add_systems(Update, (apply_aerodynamics, mouse_controls, follow_camera))
+        .add_systems(Startup, (setup, grab_cursor, setup_hud))
+        .add_systems(Update, (apply_aerodynamics, mouse_controls, follow_camera, update_hud))
         .run();
 }
 
@@ -39,6 +39,11 @@ struct Aircraft;
 
 #[derive(Component)]
 struct FollowCamera;
+
+// HUD element markers
+#[derive(Component)] struct ThrottleFill;
+#[derive(Component)] struct CompassDisplay;
+#[derive(Component)] struct StickDot;
 
 // ── Pilot inputs ─────────────────────────────────────────────────────────────
 
@@ -101,7 +106,7 @@ fn setup(
         ..default()
     });
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(800.0, 800.0))),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(10_000.0, 10_000.0))),
         MeshMaterial3d(ground_mat),
         Transform::default(),
         RigidBody::Static,
@@ -146,11 +151,12 @@ fn setup(
     }
 
     // ── Aircraft ──────────────────────────────────────────────────────────
+    // Start 2 km from the runway threshold at 500 m altitude, heading toward it.
     spawn_aircraft(
         &mut commands,
         &mut meshes,
         &mut materials,
-        Vec3::new(0.0, 6.0, 250.0),
+        Vec3::new(0.0, 500.0, 2000.0),
     );
 }
 
@@ -359,28 +365,209 @@ fn follow_camera(
 
 fn mouse_controls(
     mut mouse_motion: EventReader<MouseMotion>,
+    mut mouse_wheel: EventReader<MouseWheel>,
     mut controls: ResMut<PilotControls>,
     keys: Res<ButtonInput<KeyCode>>,
-    mut window_q: Query<&mut Window>,
+    mut app_exit: EventWriter<AppExit>,
 ) {
     const ELEV_SENS: f64 = 0.003;
     const AIL_SENS: f64 = 0.003;
-    const MAX_DEF: f64 = 0.436; // ≈ 25 °
+    const MAX_DEF: f64 = 0.436; // ≈ 25°
+    const THROTTLE_STEP: f64 = 0.05;
 
-    // Escape releases the cursor so the window can be closed.
+    // Escape exits the application.
     if keys.just_pressed(KeyCode::Escape) {
-        if let Ok(mut window) = window_q.get_single_mut() {
-            window.cursor_options.grab_mode = CursorGrabMode::None;
-            window.cursor_options.visible = true;
-        }
+        app_exit.send(AppExit::Success);
     }
 
+    // Mouse wheel controls throttle.
+    for ev in mouse_wheel.read() {
+        controls.throttle =
+            (controls.throttle + ev.y as f64 * THROTTLE_STEP).clamp(0.0, 1.0);
+    }
+
+    // Mouse axes control elevator and aileron.
     for ev in mouse_motion.read() {
         // Invert Y so pulling mouse back raises the nose.
         controls.elevator =
             (controls.elevator - ev.delta.y as f64 * ELEV_SENS).clamp(-MAX_DEF, MAX_DEF);
         controls.aileron =
             (controls.aileron + ev.delta.x as f64 * AIL_SENS).clamp(-MAX_DEF, MAX_DEF);
+    }
+}
+
+// ── HUD ──────────────────────────────────────────────────────────────────────
+//
+// Layout (all positions in pixels from edges):
+//   Top-center  : compass heading text
+//   Bottom-left : throttle bar (vertical, fill from bottom)
+//   Bottom-right: stick indicator (dot in 80×80 box)
+
+fn setup_hud(mut commands: Commands) {
+    // Full-screen transparent root.
+    commands
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        })
+        .with_children(|root| {
+            // ── Compass ───────────────────────────────────────────────────
+            root.spawn((
+                Text::new("HDG 000°"),
+                TextFont { font_size: 20.0, ..default() },
+                TextColor(Color::srgba(0.1, 1.0, 0.4, 0.95)),
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(14.0),
+                    // centre horizontally with a negative margin trick
+                    left: Val::Percent(50.0),
+                    ..default()
+                },
+                CompassDisplay,
+            ));
+
+            // ── Throttle bar container ─────────────────────────────────────
+            root.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    bottom: Val::Px(40.0),
+                    left: Val::Px(24.0),
+                    width: Val::Px(22.0),
+                    height: Val::Px(120.0),
+                    border: UiRect::all(Val::Px(1.0)),
+                    flex_direction: FlexDirection::ColumnReverse,
+                    overflow: Overflow::clip(),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
+                BorderColor(Color::srgba(0.1, 1.0, 0.4, 0.7)),
+            ))
+            .with_children(|bar| {
+                bar.spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Percent(60.0), // updated each frame
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.05, 0.85, 0.25, 0.9)),
+                    ThrottleFill,
+                ));
+            });
+
+            // "THR" label below the bar
+            root.spawn((
+                Text::new("THR"),
+                TextFont { font_size: 13.0, ..default() },
+                TextColor(Color::srgba(0.1, 1.0, 0.4, 0.85)),
+                Node {
+                    position_type: PositionType::Absolute,
+                    bottom: Val::Px(24.0),
+                    left: Val::Px(22.0),
+                    ..default()
+                },
+            ));
+
+            // ── Stick indicator container ──────────────────────────────────
+            root.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    bottom: Val::Px(40.0),
+                    right: Val::Px(24.0),
+                    width: Val::Px(80.0),
+                    height: Val::Px(80.0),
+                    border: UiRect::all(Val::Px(1.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
+                BorderColor(Color::srgba(0.1, 1.0, 0.4, 0.7)),
+            ))
+            .with_children(|stick| {
+                // Horizontal crosshair line
+                stick.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(0.0),
+                        top: Val::Px(38.0),
+                        width: Val::Percent(100.0),
+                        height: Val::Px(1.0),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.1, 1.0, 0.4, 0.25)),
+                ));
+                // Vertical crosshair line
+                stick.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        top: Val::Px(0.0),
+                        left: Val::Px(38.0),
+                        width: Val::Px(1.0),
+                        height: Val::Percent(100.0),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.1, 1.0, 0.4, 0.25)),
+                ));
+                // Stick dot (8×8 px)
+                stick.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        width: Val::Px(8.0),
+                        height: Val::Px(8.0),
+                        left: Val::Px(36.0),
+                        top: Val::Px(36.0),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(1.0, 0.3, 0.05, 0.95)),
+                    StickDot,
+                ));
+            });
+
+            // "STICK" label below the box
+            root.spawn((
+                Text::new("STICK"),
+                TextFont { font_size: 13.0, ..default() },
+                TextColor(Color::srgba(0.1, 1.0, 0.4, 0.85)),
+                Node {
+                    position_type: PositionType::Absolute,
+                    bottom: Val::Px(24.0),
+                    right: Val::Px(28.0),
+                    ..default()
+                },
+            ));
+        });
+}
+
+fn update_hud(
+    controls: Res<PilotControls>,
+    aircraft_q: Query<&Transform, With<Aircraft>>,
+    mut throttle_q: Query<&mut Node, (With<ThrottleFill>, Without<StickDot>)>,
+    mut compass_q: Query<&mut Text, With<CompassDisplay>>,
+    mut stick_q: Query<&mut Node, (With<StickDot>, Without<ThrottleFill>)>,
+) {
+    // Throttle fill height.
+    if let Ok(mut node) = throttle_q.get_single_mut() {
+        node.height = Val::Percent((controls.throttle * 100.0) as f32);
+    }
+
+    // Compass heading from aircraft forward direction.
+    if let (Ok(xform), Ok(mut text)) =
+        (aircraft_q.get_single(), compass_q.get_single_mut())
+    {
+        let fwd = xform.rotation * Vec3::NEG_Z;
+        // atan2(x, -z) gives CW heading from north (−Z world).
+        let hdg = (f32::atan2(fwd.x, -fwd.z).to_degrees() + 360.0) % 360.0;
+        **text = format!("HDG {:03.0}°", hdg);
+    }
+
+    // Stick dot position in the 80×80 box (usable range 0–72 with 8 px dot).
+    if let Ok(mut node) = stick_q.get_single_mut() {
+        const MAX_DEF: f64 = 0.436;
+        let ail = (controls.aileron / MAX_DEF) as f32;  // –1..1
+        let elev = (controls.elevator / MAX_DEF) as f32; // –1..1
+        let cx = (36.0 + ail * 36.0).clamp(0.0, 72.0);
+        let cy = (36.0 - elev * 36.0).clamp(0.0, 72.0); // up = smaller top
+        node.left = Val::Px(cx);
+        node.top = Val::Px(cy);
     }
 }
 
