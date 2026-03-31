@@ -78,6 +78,11 @@ pub struct TerrainTile;
 #[derive(Component)]
 pub struct TerrainBuildTask(pub Task<Mesh>);
 
+/// Marks a tile slot (or task entity) that should be despawned once it is safe
+/// to do so — i.e. after any in-flight build task has been resolved.
+#[derive(Component)]
+struct TileDespawnPending;
+
 // ── Plugin ───────────────────────────────────────────────────────────────────
 
 pub struct TerrainPlugin;
@@ -86,7 +91,7 @@ impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TerrainConfig>()
             .add_systems(Startup, setup_terrain)
-            .add_systems(Update, (update_terrain, poll_terrain_tasks));
+            .add_systems(Update, (update_terrain, poll_terrain_tasks, despawn_stale_tiles));
     }
 }
 
@@ -124,7 +129,10 @@ fn update_terrain(
     for op in ops {
         match op {
             DeltaOp::Despawn(entity) => {
-                commands.entity(entity).despawn_recursive();
+                // Don't despawn immediately — the entity may still have a
+                // TerrainBuildTask in flight.  Mark it and let
+                // poll_terrain_tasks / despawn_stale_tiles resolve it safely.
+                commands.entity(entity).insert(TileDespawnPending);
             }
             DeltaOp::Spawn { cx, cz, half, slot } => {
                 let cfg_clone = cfg.clone();
@@ -142,19 +150,35 @@ fn poll_terrain_tasks(
     state:        Res<TerrainState>,
     mut commands: Commands,
     mut meshes:   ResMut<Assets<Mesh>>,
-    mut query:    Query<(Entity, &mut TerrainBuildTask)>,
+    mut query:    Query<(Entity, &mut TerrainBuildTask, Option<&TileDespawnPending>)>,
 ) {
-    for (entity, mut task) in query.iter_mut() {
+    for (entity, mut task, despawn_pending) in query.iter_mut() {
         if let Some(mesh) = future::block_on(future::poll_once(&mut task.0)) {
-            commands
-                .entity(entity)
-                .remove::<TerrainBuildTask>()
-                .insert((
-                    Mesh3d(meshes.add(mesh)),
-                    MeshMaterial3d(state.material.clone()),
-                    Transform::default(),
-                    TerrainTile,
-                ));
+            if despawn_pending.is_some() {
+                // The tile slot was evicted before the mesh finished — discard.
+                commands.entity(entity).despawn_recursive();
+            } else {
+                commands
+                    .entity(entity)
+                    .remove::<TerrainBuildTask>()
+                    .insert((
+                        Mesh3d(meshes.add(mesh)),
+                        MeshMaterial3d(state.material.clone()),
+                        Transform::default(),
+                        TerrainTile,
+                    ));
+            }
         }
+    }
+}
+
+/// Despawn tile entities that have been marked for removal and are no longer
+/// waiting on a build task.
+fn despawn_stale_tiles(
+    mut commands: Commands,
+    query:        Query<Entity, (With<TileDespawnPending>, Without<TerrainBuildTask>)>,
+) {
+    for entity in query.iter() {
+        commands.entity(entity).despawn_recursive();
     }
 }
