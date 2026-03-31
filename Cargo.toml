@@ -1,0 +1,13 @@
+[workspace]
+members = [
+    "crates/sim",
+    "crates/fdm",
+]
+resolver = "2"
+
+# Enable fast compiles in debug builds
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

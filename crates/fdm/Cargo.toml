@@ -1,0 +1,9 @@
+[package]
+name = "c172_fdm"
+version = "0.1.0"
+edition = "2021"
+description = "C172p flight dynamics model translated from JSBSim"
+
+[[example]]
+name = "simulate"
+path = "examples/simulate.rs"
