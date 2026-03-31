@@ -95,3 +95,13 @@
 **Action:**
 - Created `README.md` at workspace root covering: project description, Rust installation (Linux via rustup + distro system deps for Bevy, Windows via win.rustup.rs + MSVC tools, macOS via rustup + xcode-select), `cargo run` / `cargo run --release` instructions, FDM headless example command, controls table, project structure tree.
 - Committed `64b8b70`, pushed.
+
+---
+
+**User:** Make the runway 1km long.
+**Action:**
+- Strip: `size(30.0, 200.0)` → `size(30.0, 1_000.0)`.
+- Centreline dashes: `i in -9..=9` (19 dashes, ±180 m) → `i in -24..=24` (49 dashes, ±480 m at 20 m pitch).
+- Threshold bar Z position: `z_sign * 95.0` → `z_sign * 495.0` (just inside ±500 m half-length).
+- Updated spawn comment ("2 km from runway threshold" → "2 km from runway centre").
+- Build clean. Committed `d9d980a`, pushed.
