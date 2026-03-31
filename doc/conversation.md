@@ -105,3 +105,23 @@
 - Threshold bar Z position: `z_sign * 95.0` → `z_sign * 495.0` (just inside ±500 m half-length).
 - Updated spawn comment ("2 km from runway threshold" → "2 km from runway centre").
 - Build clean. Committed `d9d980a`, pushed.
+
+---
+
+**User:** Add a terrain module. Model the earth as a sphere. Build a hierarchy of tiles based on a Perlin noise heightmap based on the 3D coordinates of the surface. Build 64×64 tiles to a mesh depending on the distance to the ground point at the centre of the mesh. Centre the sphere so that the origin is a point on the surface of the sphere so that rounding errors are small.
+**Action:**
+New workspace crate `crates/terrain/` with the following modules:
+
+- **`noise.rs`** — Ken Perlin's improved 3-D gradient noise (`perlin3`) + fractional Brownian motion layering (`fbm3`). 512-entry permutation table, quintic fade, 12 gradient directions. Output rescaled to approximately [-1, 1].
+- **`sphere.rs`** — `EARTH_RADIUS = 6_371_000 m`. Sphere centre at world `(0, -R, 0)` so world origin sits on the surface with normal pointing straight up (+Y). `project(fx, fz)` maps flat tangent-plane offsets to sphere position + outward normal via `d = ‖(fx, R, fz)‖`, `pos = (R·fx/d, R²/d − R, R·fz/d)`.
+- **`tile_mesh.rs`** — `build_tile_mesh(cx, cz, half, cfg)` → Bevy `Mesh`. 65×65 vertex grid = 64×64 quads. Each vertex: (1) projected onto sphere, (2) displaced along surface normal by 6-octave FBM noise evaluated at the unit surface normal vector scaled by `noise_frequency`. Smooth normals from central-difference finite differences (one extra height sample per neighbour direction).
+- **`quadtree.rs`** — `QuadTree` over flat (x, z) space. Root tile: `cx=0, cz=0, half=524_288 m` (≈ 512 km). Split condition: nearest AABB distance to camera < `half × SPLIT_FACTOR (3.0)`. Minimum tile half-size: 128 m (≈ 1 m vertex spacing). On split: marks parent entity for despawn, creates 4 child nodes. On merge: recursively collects children for despawn. Returns `Vec<DeltaOp>` (Spawn/Despawn) each frame to the Bevy plugin. Slot pointer (raw *mut node as usize) used to back-fill `entity` field after Bevy spawns each tile.
+- **`lib.rs`** — `TerrainPlugin`. `TerrainConfig` resource (`noise_frequency=64`, `noise_octaves=6`, `height_scale=2000 m`). `setup_terrain` creates shared material. `update_terrain` system reads `Camera3d` world position, calls `tree.update()`, despawns/spawns tile entities.
+
+Wire-up in `crates/sim`:
+- Removed checkerboard flat ground mesh and all related image/texture code.
+- Kept `Collider::half_space(Vec3::Y)` for physics (flat at y=0; terrain is visual only).
+- Removed `bevy_image` dependency.
+- Added `terrain = { path = "../terrain" }` to sim `Cargo.toml`.
+- Added `TerrainPlugin` to Bevy App.
+- Build clean. Committed `17d0270`, pushed.
