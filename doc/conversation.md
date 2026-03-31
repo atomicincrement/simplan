@@ -41,3 +41,22 @@
   - Converts body-frame moments to Bevy local frame: `(M, −N, −L) * LBFFT_TO_NM`.
   - Rotates both into world frame and writes to `ExternalForce`/`ExternalTorque` via `DerefMut`.
 - Build clean; pushed to `atomicincrement/simplan` master.
+---
+
+**User:** Centre the stick / ignore mouse input for a clean FDM comparison.
+**Action:**
+- Simplified `mouse_controls` to always set `controls.elevator = 0.0` and `controls.aileron = 0.0`.
+- Removed `window_q: Query<&Window>` parameter and all dead constants (`MAX_DEF`, `BOX_W/H`, `BOX_RIGHT/BOTTOM`).
+- Build: clean.
+
+---
+
+**User:** (Implicit – physics correctness review before comparison run)
+**Analysis:**
+- Identified two bugs in physics integration:
+  1. `apply_aerodynamics` ran in Bevy's `Update` schedule (variable-rate) instead of Avian's `PhysicsSchedule` (fixed-rate). Forces were computed from stale state and could miss physics substeps.
+  2. `ExternalForce`/`ExternalTorque` default to `persistent: true`, meaning the last Update-computed force persisted across multiple physics steps without being refreshed.
+**Action:**
+- Moved `apply_aerodynamics` from `Update` to `PhysicsSchedule` with `.in_set(PhysicsStepSet::First)` — runs once at the start of each fixed physics step, before BroadPhase/Solver.
+- Changed spawn to `ExternalForce::default().with_persistence(false)` and `ExternalTorque::default().with_persistence(false)` — forces are auto-cleared after each physics step so they can't accumulate stale values.
+- Build: clean. Committed and pushed: `bbcbf55`.

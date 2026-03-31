@@ -50,6 +50,7 @@ struct FollowCamera;
 #[derive(Component)] struct CompassDisplay;
 #[derive(Component)] struct StickDot;
 #[derive(Component)] struct AltimeterDisplay;
+#[derive(Component)] struct AirspeedDisplay;
 
 // ── Simulation clock ─────────────────────────────────────────────────────────────────
 
@@ -459,6 +460,20 @@ fn setup_hud(mut commands: Commands) {
                 AltimeterDisplay,
             ));
 
+            // ── Airspeed indicator ─────────────────────────────────────────
+            root.spawn((
+                Text::new("IAS   0 kt"),
+                TextFont { font_size: 20.0, ..default() },
+                TextColor(Color::srgba(0.1, 1.0, 0.4, 0.95)),
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(66.0),
+                    left: Val::Percent(50.0),
+                    ..default()
+                },
+                AirspeedDisplay,
+            ));
+
             // ── Throttle bar container ─────────────────────────────────────
             root.spawn((
                 Node {
@@ -571,10 +586,11 @@ fn setup_hud(mut commands: Commands) {
 
 fn update_hud(
     controls: Res<PilotControls>,
-    aircraft_q: Query<&Transform, With<Aircraft>>,
+    aircraft_q: Query<(&Transform, &LinearVelocity), With<Aircraft>>,
     mut throttle_q: Query<&mut Node, (With<ThrottleFill>, Without<StickDot>)>,
-    mut compass_q: Query<&mut Text, With<CompassDisplay>>,
-    mut altimeter_q: Query<&mut Text, (With<AltimeterDisplay>, Without<CompassDisplay>)>,
+    mut compass_q: Query<&mut Text, (With<CompassDisplay>, Without<AltimeterDisplay>, Without<AirspeedDisplay>)>,
+    mut altimeter_q: Query<&mut Text, (With<AltimeterDisplay>, Without<CompassDisplay>, Without<AirspeedDisplay>)>,
+    mut airspeed_q: Query<&mut Text, (With<AirspeedDisplay>, Without<CompassDisplay>, Without<AltimeterDisplay>)>,
     mut stick_q: Query<&mut Node, (With<StickDot>, Without<ThrottleFill>)>,
 ) {
     // Throttle fill height.
@@ -582,7 +598,7 @@ fn update_hud(
         node.height = Val::Percent((controls.throttle * 100.0) as f32);
     }
 
-    if let Ok(xform) = aircraft_q.get_single() {
+    if let Ok((xform, vel)) = aircraft_q.get_single() {
         let fwd = xform.rotation * Vec3::NEG_Z;
         let hdg = (f32::atan2(fwd.x, -fwd.z).to_degrees() + 360.0) % 360.0;
         if let Ok(mut text) = compass_q.get_single_mut() {
@@ -591,6 +607,11 @@ fn update_hud(
         let alt_ft = xform.translation.y * M_TO_FT;
         if let Ok(mut text) = altimeter_q.get_single_mut() {
             **text = format!("ALT {:5.0} ft", alt_ft);
+        }
+        // 1 m/s = 1.94384 knots
+        let ias_kt = vel.0.length() * 1.943_84;
+        if let Ok(mut text) = airspeed_q.get_single_mut() {
+            **text = format!("IAS {:3.0} kt", ias_kt);
         }
     }
 
