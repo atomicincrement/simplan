@@ -369,6 +369,16 @@ fn mouse_controls(
             (controls.throttle + ev.y as f64 * THROTTLE_STEP).clamp(0.0, 1.0);
     }
 
+    // WASD: full-deflection digital stick input.
+    // W/S = pitch up/down; A/D = roll left/right.
+    let mut kb_ail:  f64 = 0.0;
+    let mut kb_elev: f64 = 0.0;
+    if keys.pressed(KeyCode::KeyA) { kb_ail  -= MAX_AIL_DEF; }
+    if keys.pressed(KeyCode::KeyD) { kb_ail  += MAX_AIL_DEF; }
+    if keys.pressed(KeyCode::KeyW) { kb_elev += MAX_ELEV_DEF; }
+    if keys.pressed(KeyCode::KeyS) { kb_elev -= MAX_ELEV_DEF; }
+    let kb_active = kb_ail != 0.0 || kb_elev != 0.0;
+
     // Drive the stick from cursor position inside the box only when LMB is held.
     if mouse_buttons.pressed(MouseButton::Left) {
         if let Ok(window) = window_q.get_single() {
@@ -392,9 +402,14 @@ fn mouse_controls(
         }
     }
 
-    // LMB not held, or cursor outside box — centre the stick.
-    controls.elevator = 0.0;
-    controls.aileron  = 0.0;
+    if kb_active {
+        controls.aileron  = kb_ail;
+        controls.elevator = kb_elev;
+    } else {
+        // Neither mouse nor keyboard — centre the stick.
+        controls.elevator = 0.0;
+        controls.aileron  = 0.0;
+    }
 }
 
 // ── HUD ──────────────────────────────────────────────────────────────────────
