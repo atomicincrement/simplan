@@ -20,8 +20,12 @@ pub mod sphere;
 pub mod tile_mesh;
 pub mod quadtree;
 
-use bevy::prelude::*;
+use bevy::{
+    prelude::*,
+    tasks::{futures_lite::future, AsyncComputeTaskPool, Task},
+};
 
+use geodata::GeoCache;
 use quadtree::{DeltaOp, QuadTree};
 use tile_mesh::build_tile_mesh;
 
@@ -31,14 +35,17 @@ use tile_mesh::build_tile_mesh;
 /// plugin, or the defaults will be used.
 #[derive(Resource, Clone)]
 pub struct TerrainConfig {
-    /// Base spatial frequency of the noise evaluated on the unit sphere normal.
-    /// noise_frequency / EARTH_RADIUS ≈ cycles per metre in the tangent plane.
-    /// 400 → wavelength ≈ 16 km; dramatic mountains visible at 10–50 km range.
+    // ── Procedural noise (fallback when geo_cache is None) ────────────────
     pub noise_frequency: f32,
-    /// Number of FBM octaves.  More octaves = more detail but slower meshing.
     pub noise_octaves: u32,
-    /// Peak-to-trough height of the terrain in metres (+2 000 m / −2 000 m).
     pub height_scale: f32,
+    // ── Real-world elevation ───────────────────────────────────────────────
+    /// When Some, fetches real elevation from AWS Terrain Tiles on demand.
+    pub geo_cache:  Option<GeoCache>,
+    /// WGS-84 latitude of the world origin (degrees).
+    pub centre_lat: f64,
+    /// WGS-84 longitude of the world origin (degrees).
+    pub centre_lon: f64,
 }
 
 impl Default for TerrainConfig {
@@ -47,6 +54,9 @@ impl Default for TerrainConfig {
             noise_frequency: 400.0,
             noise_octaves:   7,
             height_scale:    2_000.0,
+            geo_cache:   None,
+            centre_lat:  geodata::CENTRE_LAT,
+            centre_lon:  geodata::CENTRE_LON,
         }
     }
 }
@@ -64,6 +74,10 @@ pub struct TerrainState {
 #[derive(Component)]
 pub struct TerrainTile;
 
+/// Holds an in-flight async mesh-build task; replaced by the full tile once done.
+#[derive(Component)]
+pub struct TerrainBuildTask(pub Task<Mesh>);
+
 // ── Plugin ───────────────────────────────────────────────────────────────────
 
 pub struct TerrainPlugin;
@@ -72,7 +86,7 @@ impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TerrainConfig>()
             .add_systems(Startup, setup_terrain)
-            .add_systems(Update, update_terrain);
+            .add_systems(Update, (update_terrain, poll_terrain_tasks));
     }
 }
 
@@ -94,49 +108,53 @@ fn setup_terrain(
 }
 
 fn update_terrain(
-    mut state:     ResMut<TerrainState>,
-    cfg:           Res<TerrainConfig>,
-    camera_q:      Query<&GlobalTransform, With<Camera3d>>,
-    mut commands:  Commands,
-    mut meshes:    ResMut<Assets<Mesh>>,
+    mut state:    ResMut<TerrainState>,
+    cfg:          Res<TerrainConfig>,
+    camera_q:     Query<&GlobalTransform, With<Camera3d>>,
+    mut commands: Commands,
 ) {
-    // Determine the observer position in flat (x, z) coordinates.
-    // We use the camera; fall back to origin if no camera exists yet.
     let cam_pos = camera_q
         .get_single()
         .map(|gt| gt.translation())
         .unwrap_or(Vec3::ZERO);
 
-    let cam_x = cam_pos.x;
-    let cam_z = cam_pos.z;
+    let ops = state.tree.update(cam_pos.x, cam_pos.z);
+    let pool = AsyncComputeTaskPool::get();
 
-    // Run the quad-tree update.
-    let ops = state.tree.update(cam_x, cam_z);
-
-    // We need to clone the material handle before the mutable borrow below.
-    let mat_handle = state.material.clone();
-
-    // Process operations.
     for op in ops {
         match op {
             DeltaOp::Despawn(entity) => {
                 commands.entity(entity).despawn_recursive();
             }
             DeltaOp::Spawn { cx, cz, half, slot } => {
-                let mesh = build_tile_mesh(cx, cz, half, &cfg);
-                let mesh_handle = meshes.add(mesh);
-
-                let entity = commands
-                    .spawn((
-                        Mesh3d(mesh_handle),
-                        MeshMaterial3d(mat_handle.clone()),
-                        Transform::default(),
-                        TerrainTile,
-                    ))
-                    .id();
-
+                let cfg_clone = cfg.clone();
+                let task: Task<Mesh> =
+                    pool.spawn(async move { build_tile_mesh(cx, cz, half, &cfg_clone) });
+                let entity = commands.spawn(TerrainBuildTask(task)).id();
                 state.tree.assign_entity(slot, entity);
             }
+        }
+    }
+}
+
+/// Promote completed mesh-build tasks to full tile entities.
+fn poll_terrain_tasks(
+    state:        Res<TerrainState>,
+    mut commands: Commands,
+    mut meshes:   ResMut<Assets<Mesh>>,
+    mut query:    Query<(Entity, &mut TerrainBuildTask)>,
+) {
+    for (entity, mut task) in query.iter_mut() {
+        if let Some(mesh) = future::block_on(future::poll_once(&mut task.0)) {
+            commands
+                .entity(entity)
+                .remove::<TerrainBuildTask>()
+                .insert((
+                    Mesh3d(meshes.add(mesh)),
+                    MeshMaterial3d(state.material.clone()),
+                    Transform::default(),
+                    TerrainTile,
+                ));
         }
     }
 }

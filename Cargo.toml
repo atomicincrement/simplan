@@ -3,6 +3,7 @@ members = [
     "crates/sim",
     "crates/fdm",
     "crates/terrain",
+    "crates/geodata",
 ]
 resolver = "2"
 

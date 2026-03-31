@@ -26,6 +26,8 @@ use crate::{
     TerrainConfig,
 };
 
+use geodata::tile::{flat_to_lat_lon, zoom_for_half};
+
 /// Number of quads along each tile edge (65×65 vertex grid = 64×64 quads).
 pub const GRID: usize = 64;
 const VERTS: usize = GRID + 1;   // vertices per side = 65
@@ -48,31 +50,32 @@ fn lerp_col(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t, 1.0]
 }
 
-fn altitude_color(y: f32, hs: f32) -> [f32; 4] {
-    let t = y / hs; // normalised 0 → 1 (heights below sea level are clamped to 0)
+/// Colour ramp based on absolute altitude in metres (sea level = 0).
+fn altitude_color(y: f32) -> [f32; 4] {
     const OCEAN:   [f32; 4] = [0.04, 0.18, 0.48, 1.0];
     const SHALLOW: [f32; 4] = [0.10, 0.38, 0.65, 1.0];
     const BEACH:   [f32; 4] = [0.82, 0.76, 0.56, 1.0];
     const PASTURE: [f32; 4] = [0.22, 0.52, 0.18, 1.0];
+    const HEATHER: [f32; 4] = [0.38, 0.32, 0.42, 1.0];
     const ROCK:    [f32; 4] = [0.46, 0.43, 0.38, 1.0];
     const SNOW:    [f32; 4] = [0.95, 0.95, 0.98, 1.0];
-    if t < 0.005 {
-        // Flat sea – ocean blue.
-        lerp_col(OCEAN, SHALLOW, t / 0.005)
-    } else if t < 0.02 {
-        // Shallow water → sandy beach.
-        lerp_col(SHALLOW, BEACH, (t - 0.005) / 0.015)
-    } else if t < 0.05 {
-        // Beach → pasture.
-        lerp_col(BEACH, PASTURE, (t - 0.02) / 0.03)
-    } else if t < 0.50 {
-        // Pasture → rock.
-        lerp_col(PASTURE, ROCK, (t - 0.05) / 0.45)
-    } else if t < 0.80 {
+
+    if y < -10.0 {
+        OCEAN
+    } else if y < 0.0 {
+        lerp_col(OCEAN, SHALLOW, (y + 10.0) / 10.0)
+    } else if y < 6.0 {
+        lerp_col(SHALLOW, BEACH, y / 6.0)
+    } else if y < 50.0 {
+        lerp_col(BEACH, PASTURE, (y - 6.0) / 44.0)
+    } else if y < 600.0 {
+        lerp_col(PASTURE, HEATHER, (y - 50.0) / 550.0)
+    } else if y < 1200.0 {
+        lerp_col(HEATHER, ROCK, (y - 600.0) / 600.0)
+    } else if y < 1700.0 {
         ROCK
     } else {
-        // Rock → snow.
-        lerp_col(ROCK, SNOW, (t - 0.80) / 0.20)
+        lerp_col(ROCK, SNOW, (y - 1700.0) / 300.0)
     }
 }
 
@@ -91,20 +94,31 @@ pub fn build_tile_mesh(cx: f32, cz: f32, half: f32, cfg: &TerrainConfig) -> Mesh
     let mut colors    = Vec::with_capacity(total_verts);
     let mut uvs       = Vec::with_capacity(total_verts);
 
-    // Helper: sample height at arbitrary flat (fx, fz).
-    // Clamped to >= 0 so that below-sea-level noise produces flat water.
+    // Choose zoom level once for this tile.
+    let zoom = zoom_for_half(half, cfg.centre_lat);
+
+    // Helper: sample height at arbitrary flat (fx, fz) — real or FBM.
     let height = |fx: f32, fz: f32| -> f32 {
-        let sp = project(fx, fz);
-        let n = sp.normal;
-        (fbm3(
-            n[0] * cfg.noise_frequency,
-            n[1] * cfg.noise_frequency,
-            n[2] * cfg.noise_frequency,
-            1.0,
-            cfg.noise_octaves,
-            2.0,
-            0.5,
-        ) * cfg.height_scale).max(0.0)
+        if let Some(ref cache) = cfg.geo_cache {
+            let (lat, lon) = flat_to_lat_lon(
+                fx, fz,
+                cfg.centre_lat, cfg.centre_lon,
+            );
+            cache.elevation_at(lat, lon, zoom).max(0.0)
+        } else {
+            // FBM noise fallback.
+            let sp = project(fx, fz);
+            let n = sp.normal;
+            (fbm3(
+                n[0] * cfg.noise_frequency,
+                n[1] * cfg.noise_frequency,
+                n[2] * cfg.noise_frequency,
+                1.0,
+                cfg.noise_octaves,
+                2.0,
+                0.5,
+            ) * cfg.height_scale).max(0.0)
+        }
     };
 
     // Helper: world position of vertex at flat (fx, fz).
@@ -128,8 +142,8 @@ pub fn build_tile_mesh(cx: f32, cz: f32, half: f32, cfg: &TerrainConfig) -> Mesh
             let world_y = pos[1];
             positions.push(pos);
 
-            // Altitude-based vertex colour.
-            colors.push(altitude_color(world_y, cfg.height_scale));
+            // Altitude-based vertex colour (absolute metres).
+            colors.push(altitude_color(world_y));
 
             // UV: simple 0…1 across the tile.
             uvs.push([i as f32 / GRID as f32, j as f32 / GRID as f32]);
@@ -177,19 +191,29 @@ pub fn build_tile_mesh(cx: f32, cz: f32, half: f32, cfg: &TerrainConfig) -> Mesh
 /// Compute terrain height at a single flat (fx, fz) coordinate.
 /// Used externally to query ground elevation for physics / HUD.
 pub fn terrain_height_at(fx: f32, fz: f32, cfg: &TerrainConfig) -> f32 {
-    let sp = project(fx, fz);
-    let n = sp.normal;
-    let noise = fbm3(
-        n[0] * cfg.noise_frequency,
-        n[1] * cfg.noise_frequency,
-        n[2] * cfg.noise_frequency,
-        1.0,
-        cfg.noise_octaves,
-        2.0,
-        0.5,
-    );
-    // Sphere surface y + noise displacement (clamped to sea level).
-    sp.position[1] + sp.normal[1] * (noise * cfg.height_scale).max(0.0)
+    if let Some(ref cache) = cfg.geo_cache {
+        let zoom = zoom_for_half(1024.0, cfg.centre_lat);
+        let (lat, lon) = flat_to_lat_lon(
+            fx, fz,
+            cfg.centre_lat, cfg.centre_lon,
+        );
+        let h = cache.elevation_at(lat, lon, zoom).max(0.0);
+        let sp = project(fx, fz);
+        sp.position[1] + sp.normal[1] * h
+    } else {
+        let sp = project(fx, fz);
+        let n = sp.normal;
+        let noise = fbm3(
+            n[0] * cfg.noise_frequency,
+            n[1] * cfg.noise_frequency,
+            n[2] * cfg.noise_frequency,
+            1.0,
+            cfg.noise_octaves,
+            2.0,
+            0.5,
+        );
+        sp.position[1] + sp.normal[1] * (noise * cfg.height_scale).max(0.0)
+    }
 }
 
 

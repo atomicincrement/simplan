@@ -5,7 +5,8 @@ use fdm::atmo::atmosphere;
 use fdm::f35::aero::{aerodynamics, AeroIn};
 use fdm::f35::prop::propulsion;
 use fdm::math::Vec3 as FdmVec3;
-use terrain::TerrainPlugin;
+use geodata::GeoCache;
+use terrain::{TerrainConfig, TerrainPlugin};
 
 mod sky;
 use sky::{SkyPlugin, SUN_DIR};
@@ -25,6 +26,10 @@ fn main() {
             ..default()
         }))
         .add_plugins(PhysicsPlugins::default())
+        .insert_resource(TerrainConfig {
+            geo_cache: Some(GeoCache::new()),
+            ..default()
+        })
         .add_plugins(TerrainPlugin)
         .add_plugins(SkyPlugin)
         .insert_resource(ClearColor(Color::BLACK))
