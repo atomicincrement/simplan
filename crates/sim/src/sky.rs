@@ -24,12 +24,11 @@ use bevy::{
 pub const SUN_DIR: Vec3 = Vec3::new(0.990, 0.141, 0.0);
 
 // ── Dome geometry ─────────────────────────────────────────────────────────────
-const SKY_RADIUS: f32 = 900_000.0; // 900 km – well inside any reasonable far plane
-const RINGS:    usize = 48;         // latitude divisions (south pole → north pole)
-const SECTORS:  usize = 96;         // longitude divisions
+const SKY_RADIUS: f32 = 50_000.0;  // 50 km – stays well within float depth precision
+const RINGS:    usize = 48;
+const SECTORS:  usize = 96;
 
 // ── Sun disc ──────────────────────────────────────────────────────────────────
-// Real solar angular radius ≈ 0.27°; we use 0.6° for visibility.
 const SUN_ANG_DEG:  f32 = 0.6;
 const SUN_DISC_R:   f32 = SKY_RADIUS * 0.95 * (SUN_ANG_DEG * PI / 180.0);
 const SUN_SECTORS:  usize = 48;
@@ -164,12 +163,11 @@ fn sky_color(dir: Vec3) -> [f32; 4] {
 fn build_skydome_mesh() -> Mesh {
     let total = (RINGS + 1) * (SECTORS + 1);
     let mut positions = Vec::with_capacity(total);
-    let mut colors    = Vec::with_capacity(total);
     let mut normals   = Vec::with_capacity(total);
     let mut uvs       = Vec::with_capacity(total);
 
     for r in 0..=RINGS {
-        let phi = PI * r as f32 / RINGS as f32; // 0 (top) → π (bottom)
+        let phi = PI * r as f32 / RINGS as f32;
         let sp = phi.sin();
         let cp = phi.cos();
         for s in 0..=SECTORS {
@@ -177,17 +175,12 @@ fn build_skydome_mesh() -> Mesh {
             let x = sp * theta.cos();
             let y = cp;
             let z = sp * theta.sin();
-            let dir = Vec3::new(x, y, z);
             positions.push([x * SKY_RADIUS, y * SKY_RADIUS, z * SKY_RADIUS]);
-            colors.push(sky_color(dir));
-            // Inward-pointing normals so the inside of the sphere is lit.
             normals.push([-x, -y, -z]);
             uvs.push([s as f32 / SECTORS as f32, r as f32 / RINGS as f32]);
         }
     }
 
-    // Flipped winding → inside faces become front-facing so default back-cull
-    // shows only the interior.
     let mut indices: Vec<u32> = Vec::new();
     let w = (SECTORS + 1) as u32;
     for r in 0..RINGS as u32 {
@@ -204,7 +197,6 @@ fn build_skydome_mesh() -> Mesh {
     let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL,   normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR,    colors);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0,     uvs);
     mesh.insert_indices(Indices::U32(indices));
     mesh
@@ -263,13 +255,13 @@ fn setup_sky(
     mut meshes:   ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Skydome: unlit, double-sided (disables face-cull so the interior is
-    // always visible regardless of winding), vertex colours carry all the sky
-    // colour information.
+    // DEBUG: solid bright magenta to confirm dome geometry is rendering at all.
+    // Once visible, we will restore vertex colours.
     let sky_mat = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
+        base_color: Color::srgb(1.0, 0.0, 1.0),
         unlit: true,
         double_sided: true,
+        cull_mode: None,
         fog_enabled: false,
         ..default()
     });
