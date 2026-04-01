@@ -1,4 +1,5 @@
 use avian3d::prelude::*;
+use bevy::input::gamepad::{Gamepad, GamepadAxis};
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use fdm::atmo::atmosphere;
@@ -42,10 +43,12 @@ fn main() {
         .add_plugins(PhysicsPlugins::default())
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(PilotControls::default())
+        .insert_resource(JoystickActive::default())
         .add_systems(Startup, (setup, spawn_labeled_tiles, setup_hud))
         .add_systems(Update, (
             follow_camera,
-            mouse_controls,
+            joystick_controls,
+            mouse_controls.after(joystick_controls),
             apply_aerodynamics,
             update_hud,
         ))
@@ -261,7 +264,7 @@ fn spawn_labeled_tiles(
             let mut rgba = tile.rgba.clone();
 
             // Draw a tiny label (tx/ty) into the top-left of the image.
-            draw_label_small(&mut rgba, 256, 256, &format!("{}/{}", tx, ty));
+            // draw_label_small(&mut rgba, 256, 256, &format!("{}/{}", tx, ty));
 
             let img = Image::new(
                 Extent3d { width: 256, height: 256, depth_or_array_layers: 1 },
@@ -562,6 +565,60 @@ fn follow_camera(
     cam.look_at(look_target, Vec3::Y);
 }
 
+// ── Joystick controls (Thrustmaster T16000M) ─────────────────────────────────
+//
+// Axis mapping (gilrs / Linux SDL2 database for T16000M):
+//   LeftStickX  → aileron  (stick roll,  right = +)
+//   LeftStickY  → elevator (stick pitch, pull back = nose up)
+//   RightZ      → rudder   (stick twist, right = +)
+//   LeftZ       → throttle slider (-1 = full forward/max, +1 = back/idle)
+//                 mapped to [0, 1]: throttle = (1 − raw) / 2
+//
+// When any gamepad is connected it has exclusive control of the stick axes;
+// mouse / WASD still control the stick only if no joystick is present.
+// Scroll wheel throttle works regardless.
+
+#[derive(Resource, Default)]
+struct JoystickActive(bool);
+
+fn joystick_controls(
+    gamepads: Query<&Gamepad>,
+    mut controls: ResMut<PilotControls>,
+    mut js_active: ResMut<JoystickActive>,
+) {
+    const MAX_AIL_DEF:  f64 = 0.3491; // ≈ 20° aileron
+    const MAX_ELEV_DEF: f64 = 0.1745; // ≈ 10° elevator
+    const MAX_RUD_DEF:  f64 = 0.2618; // ≈ 15° rudder
+    const DEADZONE: f32 = 0.03;
+
+    js_active.0 = false;
+
+    let Some(gamepad) = gamepads.iter().next() else { return; };
+    js_active.0 = true;
+
+    // Helper: apply deadzone and scale to [-max, max].
+    let scale = |raw: f32, max: f64| -> f64 {
+        let v = if raw.abs() < DEADZONE { 0.0_f32 } else { raw };
+        (v as f64 * max).clamp(-max, max)
+    };
+
+    if let Some(v) = gamepad.get(GamepadAxis::LeftStickX) {
+        controls.aileron = scale(v, MAX_AIL_DEF);
+    }
+    // LeftStickY: pull back = nose up (positive elevator).
+    if let Some(v) = gamepad.get(GamepadAxis::LeftStickY) {
+        controls.elevator = scale(v, MAX_ELEV_DEF);
+    }
+    // Twist axis on T16000M maps to RightZ via gilrs SDL2 db.
+    if let Some(v) = gamepad.get(GamepadAxis::RightZ) {
+        controls.rudder = scale(-v, MAX_RUD_DEF);
+    }
+    // Throttle slider: LeftZ, range -1 (max) to +1 (idle).
+    if let Some(v) = gamepad.get(GamepadAxis::LeftZ) {
+        controls.throttle = ((1.0 - v) / 2.0) as f64;
+    }
+}
+
 // ── Mouse controls ────────────────────────────────────────────────────────────
 //
 // When the cursor is inside the stick indicator box its position maps directly
@@ -575,6 +632,7 @@ fn mouse_controls(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     window_q: Query<&Window>,
     mut app_exit: EventWriter<AppExit>,
+    js_active: Res<JoystickActive>,
 ) {
     const THROTTLE_STEP: f64 = 0.05;
     // Stick box layout (matches setup_hud): right:24, bottom:40, 80×80 px.
@@ -588,6 +646,9 @@ fn mouse_controls(
     if keys.just_pressed(KeyCode::Escape) {
         app_exit.send(AppExit::Success);
     }
+
+    // Joystick owns all axes when connected — skip mouse/WASD input.
+    if js_active.0 { return; }
 
     for ev in mouse_wheel.read() {
         controls.throttle =
