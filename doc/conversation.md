@@ -125,3 +125,24 @@ Wire-up in `crates/sim`:
 - Added `terrain = { path = "../terrain" }` to sim `Cargo.toml`.
 - Added `TerrainPlugin` to Bevy App.
 - Build clean. Committed `17d0270`, pushed.
+
+---
+
+**User:** Can we download images to match these tiles?
+
+**Action:** Added satellite imagery support using ESRI World Imagery (free, no API key).
+
+`crates/geodata`:
+- Added `image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }` dependency.
+- New `src/imagery.rs`: `ImageryTile` (256×256 RGBA8 buffer) + `fetch_imagery_tile(x, y, zoom)` which downloads from `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}` (ESRI uses `{z}/{y}/{x}` order) and decodes JPEG via the `image` crate.
+- Updated `src/cache.rs`: `GeoCache::Inner` gains `imagery`, `imagery_inflight`, `imagery_count`, and `imagery_dir` fields (disk cache at `~/.cache/simplan/imagery/`). New methods: `get_imagery_tile_nonblocking`, `get_imagery_tile`, `imagery_fetch_count`.
+- Updated `src/lib.rs`: exposed `pub mod imagery` and re-exported `ImageryTile`.
+
+`crates/terrain`:
+- `TerrainBuildTask` task type changed from `Task<Mesh>` to `Task<(Mesh, Option<Vec<u8>>)>`.
+- New helper `sample_imagery(cx, cz, half, cfg)`: derives slippy-map tile coords, calls `get_imagery_tile_nonblocking`; returns `Some(rgba)` if cached else `None` and queues a background fetch.
+- `poll_terrain_tasks` now receives `ResMut<Assets<Image>>` and `ResMut<Assets<StandardMaterial>>`. When imagery data is present it creates a per-tile `Image` (`TextureFormat::Rgba8UnormSrgb`) and `StandardMaterial` with `base_color_texture`; otherwise the shared altitude-colour material is used as fallback.
+- New `watch_imagery_loads` system (mirrors `watch_geodata_loads`): debounces `imagery_fetch_count` changes and resets the quad-tree to respawn tiles with textures once downloads stabilise.
+- Both new systems registered in `TerrainPlugin`.
+- Build clean (zero warnings).
+

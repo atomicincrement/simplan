@@ -7,6 +7,10 @@ use fdm::f35::prop::propulsion;
 use fdm::math::Vec3 as FdmVec3;
 use geodata::GeoCache;
 use terrain::{TerrainConfig, TerrainPlugin};
+use terrain::tile_mesh::build_tile_mesh;
+use terrain::quadtree::ROOT_HALF;
+use geodata::tile::{flat_to_lat_lon, lat_lon_to_tile_xy, zoom_for_half};
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 mod sky;
 use sky::{SkyPlugin, SUN_DIR};
@@ -25,23 +29,26 @@ fn main() {
             }),
             ..default()
         }))
-        .add_plugins(PhysicsPlugins::default())
+        // Minimal runtime for terrain-only debugging.
         .insert_resource(TerrainConfig {
             geo_cache: Some(GeoCache::new()),
+            force_max_res: true,
             ..default()
         })
-        .add_plugins(TerrainPlugin)
+        // Don't add the TerrainPlugin for this diagnostic run — we spawn
+        // labeled tiles directly from `spawn_labeled_tiles`.
+        // .add_plugins(TerrainPlugin)
         .add_plugins(SkyPlugin)
+        .add_plugins(PhysicsPlugins::default())
         .insert_resource(ClearColor(Color::BLACK))
-        .init_resource::<PilotControls>()
-        .insert_resource(AmbientLight {
-            // Dim, slightly blue-warm: scattered morning skylight.
-            color: Color::srgb(0.65, 0.72, 0.90),
-            brightness: 180.0,
-        })
-        .add_systems(Startup, (setup, setup_hud))
-        .add_systems(PhysicsSchedule, apply_aerodynamics.in_set(PhysicsStepSet::First))
-        .add_systems(Update, (mouse_controls, follow_camera, update_hud))
+        .insert_resource(PilotControls::default())
+        .add_systems(Startup, (setup, spawn_labeled_tiles, setup_hud))
+        .add_systems(Update, (
+            follow_camera,
+            mouse_controls,
+            apply_aerodynamics,
+            update_hud,
+        ))
         .run();
 }
 
@@ -95,6 +102,10 @@ fn setup(
     // ── Camera ────────────────────────────────────────────────────────────
     // Far plane set to 5 000 km so the 900 km skydome and distant terrain
     // tiles are never clipped.
+    // Aircraft starts 5 km north of the map's north edge (Z = -10 000),
+    // 2 km up, heading south (+Z).  Camera is 35 m aft (-Z world) and 8 m above.
+    let cam_pos  = Vec3::new(0.0, 2008.0, -10035.0);
+    let look_pos = Vec3::new(0.0, 2001.0,  -9950.0); // 50 m ahead of nose (south)
     commands.spawn((
         Camera3d::default(),
         Projection::Perspective(PerspectiveProjection {
@@ -102,7 +113,7 @@ fn setup(
             far:  5_000_000.0,
             ..default()
         }),
-        Transform::from_xyz(-30.0, 20.0, 350.0).looking_at(Vec3::new(0.0, 3.0, 0.0), Vec3::Y),
+        Transform::from_translation(cam_pos).looking_at(look_pos, Vec3::Y),
         FollowCamera,
     ));
 
@@ -135,8 +146,231 @@ fn setup(
         &mut commands,
         &mut meshes,
         &mut materials,
-        Vec3::new(0.0, 500.0, 2000.0),
+        Vec3::new(0.0, 2000.0, -10000.0),
     );
+
+}
+
+/// Spawn a deterministic GRID×GRID mosaic of debug quads at startup.
+/// Each quad is a flat tile built with `build_tile_mesh`.  If the
+/// `GeoCache` already contains imagery for the tile the texture is
+/// attached non-blocking; otherwise a plain white unlit material is used.
+fn spawn_mosaic(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    cfg: Res<TerrainConfig>,
+) {
+    const GRID: usize = 4;
+    let n = GRID as f32;
+    let half = ROOT_HALF / n; // tile half-size
+    let tile_size = half * 2.0;
+
+    for ix in 0..GRID {
+        for iz in 0..GRID {
+            let cx = -ROOT_HALF + (ix as f32 + 0.5) * tile_size;
+            let cz = -ROOT_HALF + (iz as f32 + 0.5) * tile_size;
+            let mesh = build_tile_mesh(cx, cz, half, &cfg);
+            let mesh_handle = meshes.add(mesh);
+
+            let mat = if let Some(cache) = cfg.geo_cache.as_ref() {
+                let zoom = zoom_for_half(half, cfg.centre_lat);
+                let (lat, lon) = flat_to_lat_lon(cx - half, cz - half, cfg.centre_lat, cfg.centre_lon);
+                let (tx, ty) = lat_lon_to_tile_xy(lat, lon, zoom);
+                if let Some(tile) = cache.get_imagery_tile_nonblocking(tx, ty, zoom) {
+                    let rgba = tile.rgba.clone();
+                    let img = Image::new(
+                        Extent3d { width: 256, height: 256, depth_or_array_layers: 1 },
+                        TextureDimension::D2,
+                        rgba,
+                        TextureFormat::Rgba8UnormSrgb,
+                        bevy::render::render_asset::RenderAssetUsages::RENDER_WORLD,
+                    );
+                    let tex = images.add(img);
+                    materials.add(StandardMaterial {
+                        base_color_texture: Some(tex),
+                        unlit: true,
+                        double_sided: true,
+                        cull_mode: None,
+                        perceptual_roughness: 0.9,
+                        reflectance: 0.1,
+                        ..default()
+                    })
+                } else {
+                    materials.add(StandardMaterial {
+                        base_color: Color::WHITE,
+                        unlit: true,
+                        double_sided: true,
+                        cull_mode: None,
+                        ..default()
+                    })
+                }
+            } else {
+                materials.add(StandardMaterial {
+                    base_color: Color::WHITE,
+                    unlit: true,
+                    double_sided: true,
+                    cull_mode: None,
+                    ..default()
+                })
+            };
+
+            commands.spawn((
+                Mesh3d(mesh_handle),
+                MeshMaterial3d(mat),
+                Transform::default(),
+            ));
+        }
+    }
+}
+
+/// Fetch a 4×4 grid of Web-Mercator tiles at zoom 13, label each image with
+/// its tile coordinates, create textures and spawn flat meshes with those
+/// textures.  This bypasses the `terrain` module and is intended for quick
+/// visual verification.
+fn spawn_labeled_tiles(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    cfg: Res<TerrainConfig>,
+) {
+    let Some(cache) = cfg.geo_cache.as_ref() else { return; };
+
+    // Fixed request: 4×4 at zoom 13 anchored to ROOT_HALF origin
+    let zoom: u32 = 13;
+    const GRID: usize = 4;
+    let n = GRID as f32;
+    let half = ROOT_HALF / n; // per-tile half-size in metres
+    let tile_meter = half * 2.0;
+
+    // Compute origin Web-Mercator tile for root top-left corner.
+    let (lat_origin, lon_origin) = flat_to_lat_lon(-ROOT_HALF, -ROOT_HALF, cfg.centre_lat, cfg.centre_lon);
+    let (tx_origin, ty_origin) = lat_lon_to_tile_xy(lat_origin, lon_origin, zoom);
+
+    for iz in 0..GRID {
+        for ix in 0..GRID {
+            let ix_i = ix as i32;
+            let iz_i = iz as i32;
+            let tx = tx_origin + ix_i;
+            let ty = ty_origin + iz_i;
+
+            // Blocking fetch (disk or network) to ensure texture exists.
+            let tile = cache.get_imagery_tile(tx, ty, zoom);
+            let mut rgba = tile.rgba.clone();
+
+            // Draw a tiny label (tx/ty) into the top-left of the image.
+            draw_label_small(&mut rgba, 256, 256, &format!("{}/{}", tx, ty));
+
+            let img = Image::new(
+                Extent3d { width: 256, height: 256, depth_or_array_layers: 1 },
+                TextureDimension::D2,
+                rgba,
+                TextureFormat::Rgba8UnormSrgb,
+                bevy::render::render_asset::RenderAssetUsages::RENDER_WORLD,
+            );
+            let tex = images.add(img);
+            let mat = materials.add(StandardMaterial {
+                base_color_texture: Some(tex),
+                unlit: true,
+                double_sided: true,
+                cull_mode: None,
+                perceptual_roughness: 0.9,
+                reflectance: 0.1,
+                alpha_mode: AlphaMode::Blend,
+                ..default()
+            });
+
+            // Compute world centre for this tile and spawn a quad mesh.
+            let cx = -ROOT_HALF + (ix as f32 + 0.5) * tile_meter;
+            let cz = -ROOT_HALF + (iz as f32 + 0.5) * tile_meter;
+            let mesh = build_tile_mesh(cx, cz, half, &cfg);
+            let mesh_handle = meshes.add(mesh);
+            commands.spawn((
+                Mesh3d(mesh_handle),
+                MeshMaterial3d(mat),
+                Transform::default(),
+            ));
+        }
+    }
+}
+
+/// Small 3x5 bitmap font renderer (scaled) to stamp short numeric labels
+/// into a 256×256 RGBA image buffer.  Text is drawn at top-left with a tiny
+/// scale so labels are visible but unobtrusive.
+fn draw_label_small(buf: &mut [u8], w: u32, h: u32, text: &str) {
+    // 3x5 digit font (rows from top to bottom). Each row is 3 bits (LSB unused).
+    const DIGITS: [[[u8; 3]; 5]; 10] = [
+        // 0
+        [[1,1,1],[1,0,1],[1,0,1],[1,0,1],[1,1,1]],
+        // 1
+        [[0,1,0],[1,1,0],[0,1,0],[0,1,0],[1,1,1]],
+        // 2
+        [[1,1,1],[0,0,1],[1,1,1],[1,0,0],[1,1,1]],
+        // 3
+        [[1,1,1],[0,0,1],[1,1,1],[0,0,1],[1,1,1]],
+        // 4
+        [[1,0,1],[1,0,1],[1,1,1],[0,0,1],[0,0,1]],
+        // 5
+        [[1,1,1],[1,0,0],[1,1,1],[0,0,1],[1,1,1]],
+        // 6
+        [[1,1,1],[1,0,0],[1,1,1],[1,0,1],[1,1,1]],
+        // 7
+        [[1,1,1],[0,0,1],[0,0,1],[0,0,1],[0,0,1]],
+        // 8
+        [[1,1,1],[1,0,1],[1,1,1],[1,0,1],[1,1,1]],
+        // 9
+        [[1,1,1],[1,0,1],[1,1,1],[0,0,1],[1,1,1]],
+    ];
+
+    let scale = 4; // scale each font pixel to 4x4
+    let padding = 6;
+    let mut cursor_x = padding as i32;
+    let cursor_y = padding as i32;
+
+    for ch in text.chars() {
+        if ch >= '0' && ch <= '9' {
+            let d = (ch as u8 - b'0') as usize;
+            // draw 3x5 bitmap scaled
+            for ry in 0..5 {
+                for rx in 0..3 {
+                    if DIGITS[d][ry][rx] != 0 {
+                        let px = cursor_x + (rx as i32) * scale;
+                        let py = cursor_y + (ry as i32) * scale;
+                        draw_rect(buf, w, h, px as i32, py as i32, scale, scale, [255,255,0,200]);
+                    }
+                }
+            }
+            cursor_x += (3 * scale + 2) as i32;
+        } else if ch == '/' || ch == ',' || ch == '-' {
+            // small separator dot or slash
+            if ch == '/' {
+                draw_rect(buf, w, h, cursor_x, cursor_y + scale, scale/2, scale*3, [255,255,0,200]);
+            } else {
+                draw_rect(buf, w, h, cursor_x, cursor_y + scale*2, scale/2, scale/2, [255,255,0,200]);
+            }
+            cursor_x += (scale + 2) as i32;
+        } else {
+            cursor_x += (scale + 2) as i32;
+        }
+    }
+}
+
+fn draw_rect(buf: &mut [u8], w: u32, h: u32, x: i32, y: i32, rw: i32, rh: i32, color: [u8;4]) {
+    for yy in 0..rh {
+        for xx in 0..rw {
+            let px = x + xx;
+            let py = y + yy;
+            if px < 0 || py < 0 { continue; }
+            let px = px as u32;
+            let py = py as u32;
+            if px >= w || py >= h { continue; }
+            let i = ((py * w + px) * 4) as usize;
+            if i + 3 >= buf.len() { continue; }
+            buf[i] = color[0]; buf[i+1] = color[1]; buf[i+2] = color[2]; buf[i+3] = color[3];
+        }
+    }
 }
 
 // ── F-35–like aircraft built from primitive shapes ───────────────────────────
@@ -206,14 +440,15 @@ fn spawn_aircraft(
     //   wingspan ≈ 11 m  |  height ≈ 3.5 m  |  length ≈ 11 m
     commands
         .spawn((
-            Transform::from_translation(position),
+            Transform::from_translation(position)
+                .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
             Visibility::default(),
             Aircraft,
             RigidBody::Dynamic,
             Collider::cuboid(11.0, 3.5, 11.0),
             // F-35A combat-weight mass: 38 750 lbf / 32.174 ft/s² ≈ 17 576 kg
             Mass(17_576.0_f32),
-            LinearVelocity(Vec3::new(0.0, 0.0, -100.0)),
+            LinearVelocity(Vec3::new(0.0, 0.0, 100.0)), // heading south (+Z)
             ExternalForce::default().with_persistence(false),
             ExternalTorque::default().with_persistence(false),
         ))

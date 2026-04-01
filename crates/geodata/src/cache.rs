@@ -1,4 +1,4 @@
-//! Thread-safe two-level cache (memory + disk) for elevation tiles.
+//! Thread-safe two-level cache (memory + disk) for elevation and imagery tiles.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -12,6 +12,7 @@ use std::{
 
 use crate::{
     elevation::{ElevationTile, fetch_elevation_tile},
+    imagery::{ImageryTile, fetch_imagery_tile},
     tile::{lat_lon_frac_in_tile, lat_lon_to_tile_xy},
 };
 
@@ -26,37 +27,50 @@ pub struct GeoCache {
 }
 
 struct Inner {
-    elevation:   Mutex<HashMap<(i32, i32, u32), Arc<ElevationTile>>>,
-    inflight:    Mutex<HashSet<(i32, i32, u32)>>,
-    fetch_count: AtomicU32,
-    cache_dir:   PathBuf,
+    // ── Elevation ─────────────────────────────────────────────────────────
+    elevation:    Mutex<HashMap<(i32, i32, u32), Arc<ElevationTile>>>,
+    inflight:     Mutex<HashSet<(i32, i32, u32)>>,
+    fetch_count:  AtomicU32,
+    cache_dir:    PathBuf,
+    // ── Imagery ───────────────────────────────────────────────────────────
+    imagery:         Mutex<HashMap<(i32, i32, u32), Arc<ImageryTile>>>,
+    imagery_inflight: Mutex<HashSet<(i32, i32, u32)>>,
+    imagery_count:   AtomicU32,
+    imagery_dir:     PathBuf,
 }
 
 impl GeoCache {
     pub fn new() -> Self {
-        let cache_dir = {
+        let base = {
             #[cfg(unix)]
             {
                 std::env::var("HOME")
-                    .map(|h| PathBuf::from(h).join(".cache").join("simplan").join("elevation"))
-                    .unwrap_or_else(|_| PathBuf::from(".simplan_cache").join("elevation"))
+                    .map(|h| PathBuf::from(h).join(".cache").join("simplan"))
+                    .unwrap_or_else(|_| PathBuf::from(".simplan_cache"))
             }
             #[cfg(not(unix))]
             {
                 std::env::var("APPDATA")
-                    .map(|h| PathBuf::from(h).join("simplan").join("elevation"))
-                    .unwrap_or_else(|_| PathBuf::from(".simplan_cache").join("elevation"))
+                    .map(|h| PathBuf::from(h).join("simplan"))
+                    .unwrap_or_else(|_| PathBuf::from(".simplan_cache"))
             }
         };
 
+        let cache_dir   = base.join("elevation");
+        let imagery_dir = base.join("imagery");
         let _ = fs::create_dir_all(&cache_dir);
+        let _ = fs::create_dir_all(&imagery_dir);
 
         Self {
             inner: Arc::new(Inner {
-                elevation:   Mutex::new(HashMap::new()),
-                inflight:    Mutex::new(HashSet::new()),
-                fetch_count: AtomicU32::new(0),
+                elevation:        Mutex::new(HashMap::new()),
+                inflight:         Mutex::new(HashSet::new()),
+                fetch_count:      AtomicU32::new(0),
                 cache_dir,
+                imagery:          Mutex::new(HashMap::new()),
+                imagery_inflight: Mutex::new(HashSet::new()),
+                imagery_count:    AtomicU32::new(0),
+                imagery_dir,
             }),
         }
     }
@@ -101,11 +115,64 @@ impl GeoCache {
         0.0
     }
 
-    /// Number of tiles that have been loaded into the memory cache.
-    /// Increments each time a new tile is inserted (disk or network).
-    /// Use this as a generation counter to detect when new data is available.
+    /// Number of elevation tiles that have been loaded into the memory cache.
+    /// Use as a generation counter to detect when new elevation data is available.
     pub fn fetch_count(&self) -> u32 {
         self.inner.fetch_count.load(Ordering::Relaxed)
+    }
+
+    // ── Imagery ─────────────────────────────────────────────────────────────
+
+    /// Non-blocking imagery tile access.
+    ///
+    /// Returns the tile immediately if it is already in the memory cache.
+    /// Otherwise fires a background thread to load/fetch it and returns `None`.
+    /// Poll `imagery_fetch_count()` to know when new imagery has arrived.
+    pub fn get_imagery_tile_nonblocking(&self, x: i32, y: i32, zoom: u32) -> Option<Arc<ImageryTile>> {
+        // Fast path.
+        {
+            let map = self.inner.imagery.lock().unwrap();
+            if let Some(t) = map.get(&(x, y, zoom)) {
+                return Some(Arc::clone(t));
+            }
+        }
+
+        // Kick off a background fetch if not already in flight.
+        {
+            let mut inflight = self.inner.imagery_inflight.lock().unwrap();
+            if inflight.insert((x, y, zoom)) {
+                let cache = self.clone();
+                std::thread::spawn(move || {
+                    cache.get_imagery_tile(x, y, zoom);
+                    cache.inner.imagery_inflight.lock().unwrap().remove(&(x, y, zoom));
+                });
+            }
+        }
+
+        None
+    }
+
+    /// Blocking imagery tile access.  Loads from disk cache or network.
+    pub fn get_imagery_tile(&self, x: i32, y: i32, zoom: u32) -> Arc<ImageryTile> {
+        // Fast path.
+        {
+            let map = self.inner.imagery.lock().unwrap();
+            if let Some(t) = map.get(&(x, y, zoom)) {
+                return Arc::clone(t);
+            }
+        }
+
+        let tile = self.load_or_fetch_imagery(x, y, zoom);
+        let tile = Arc::new(tile);
+        self.inner.imagery.lock().unwrap().insert((x, y, zoom), Arc::clone(&tile));
+        self.inner.imagery_count.fetch_add(1, Ordering::Relaxed);
+        tile
+    }
+
+    /// Number of imagery tiles loaded into the memory cache.
+    /// Use as a generation counter to detect when satellite textures are ready.
+    pub fn imagery_fetch_count(&self) -> u32 {
+        self.inner.imagery_count.load(Ordering::Relaxed)
     }
 
     // ── Internal ─────────────────────────────────────────────────────────────
@@ -124,6 +191,34 @@ impl GeoCache {
         let tile = Arc::new(tile);
         self.inner.elevation.lock().unwrap().insert((x, y, zoom), Arc::clone(&tile));
         self.inner.fetch_count.fetch_add(1, Ordering::Relaxed);
+        tile
+    }
+
+    fn load_or_fetch_imagery(&self, x: i32, y: i32, zoom: u32) -> ImageryTile {
+        let path = self.inner.imagery_dir.join(format!("{zoom}_{x}_{y}.rgba"));
+
+        if path.exists() {
+            if let Ok(bytes) = fs::read(&path) {
+                if let Some(t) = ImageryTile::from_bytes(bytes) {
+                    eprintln!("[geodata] imagery disk  {zoom}/{x}/{y}");
+                    return t;
+                }
+            }
+        }
+
+        eprintln!("[geodata] imagery fetch {zoom}/{x}/{y} …");
+        let tile = match fetch_imagery_tile(x, y, zoom) {
+            Ok(t) => {
+                eprintln!("[geodata] imagery fetch {zoom}/{x}/{y} OK");
+                t
+            }
+            Err(e) => {
+                eprintln!("[geodata] imagery fetch {zoom}/{x}/{y} FAILED: {e}");
+                ImageryTile::blank()
+            }
+        };
+
+        let _ = fs::write(&path, tile.to_bytes());
         tile
     }
 

@@ -4,5 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ureq = "2"
-png  = "0.17"
+ureq  = "2"
+png   = "0.17"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+bevy  = { version = "0.15", features = ["dynamic_linking"] }

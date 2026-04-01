@@ -9,9 +9,11 @@
 
 pub mod cache;
 pub mod elevation;
+pub mod imagery;
 pub mod tile;
 
 pub use cache::GeoCache;
+pub use imagery::ImageryTile;
 
 // ── Default scene centre: Ålesund Airport, Vigra (ENAL) ──────────────────────
 // 62.5625°N, 6.1097°E – fjords, sea, and 1 700 m peaks within 20 km.

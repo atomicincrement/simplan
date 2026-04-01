@@ -52,8 +52,9 @@ pub fn zoom_for_half(half: f32, lat_deg: f64) -> u32 {
     let tile_width_m = half as f64 * 2.0;
     // At this latitude, the circumference of a parallel in metres.
     let circ = 2.0 * PI * crate::EARTH_RADIUS_M * lat_deg.to_radians().cos();
-    // We want ~128 elevation pixels across the tile.
-    let wanted_tile_width_m = tile_width_m;   // one Terrarium tile per terrain tile
-    let z = (circ / (256.0 * wanted_tile_width_m)).log2().round() as i32;
-    z.clamp(5, 15) as u32
+    // Choose z so one Web-Mercator tile roughly matches the terrain tile
+    // width in metres: tile_m = circ / 2^z  →  z = log2(circ / tile_m).
+    let z = (circ / tile_width_m).log2().round() as i32;
+    // Clamp to sensible web-mercator zooms.
+    z.clamp(5, 19) as u32
 }

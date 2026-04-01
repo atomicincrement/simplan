@@ -17,7 +17,9 @@ use bevy::prelude::Entity;
 const SPLIT_FACTOR: f32 = 4.0;
 
 /// Finest tile half-size in metres (smallest tiles that will be meshed).
-const MIN_HALF: f32 = 64.0;
+/// With ROOT_HALF = 5 000 m this allows at most 2 splits:
+///   5 000 → 2 500 → 1 250  (1 250 is not > MIN_HALF, so no further split).
+const MIN_HALF: f32 = 1_250.0;
 
 // ── Data types ───────────────────────────────────────────────────────────────
 
@@ -160,8 +162,8 @@ pub enum DeltaOp {
 
 /// Root of the terrain quad-tree.
 ///
-/// The root tile covers ±ROOT_HALF metres in flat x and z (roughly ±512 km).
-pub const ROOT_HALF: f32 = 524_288.0; // 2^19 metres ≈ 524 km
+/// The root tile covers ±ROOT_HALF metres in flat x and z.
+pub const ROOT_HALF: f32 = 5_000.0; // 10 km × 10 km
 
 pub struct QuadTree {
     pub root: QuadNode,
@@ -172,11 +174,74 @@ impl QuadTree {
         Self { root: QuadNode::new(0.0, 0.0, ROOT_HALF) }
     }
 
+    /// Force full subdivision down to `MIN_HALF` so the tree contains the
+    /// highest-resolution leaf nodes everywhere. Useful for debugging.
+    pub fn force_max_depth(&mut self) {
+        fn recurse(node: &mut QuadNode) {
+            if node.half <= MIN_HALF {
+                // already at or below minimum
+                node.children = None;
+                return;
+            }
+            // create children if missing
+            if node.children.is_none() {
+                let h = node.half * 0.5;
+                node.children = Some(Box::new([
+                    QuadNode::new(node.cx - h, node.cz - h, h), // SW
+                    QuadNode::new(node.cx + h, node.cz - h, h), // SE
+                    QuadNode::new(node.cx - h, node.cz + h, h), // NW
+                    QuadNode::new(node.cx + h, node.cz + h, h), // NE
+                ]));
+            }
+            if let Some(children) = &mut node.children {
+                for child in children.iter_mut() {
+                    recurse(child);
+                }
+            }
+        }
+        recurse(&mut self.root);
+    }
+
     /// Update the tree from the camera's flat (x, z) position and return a
     /// list of spawn/despawn operations to execute.
     pub fn update(&mut self, cam_x: f32, cam_z: f32) -> Vec<DeltaOp> {
         let mut ops = Vec::new();
         self.root.update(cam_x, cam_z, &mut ops);
+        ops
+    }
+
+    /// Force the tree into a state where all leaf nodes are the finest
+    /// resolution (children exist down to MIN_HALF) and return spawn ops
+    /// for any leaf nodes that need entities, and despawn ops for any
+    /// non-leaf nodes that currently own entities. This is used when the
+    /// application requests rendering only the highest-resolution tiles.
+    pub fn update_force_leaves(&mut self) -> Vec<DeltaOp> {
+        let mut ops = Vec::new();
+
+        fn recurse(node: &mut QuadNode, ops: &mut Vec<DeltaOp>) {
+            if let Some(children) = &mut node.children {
+                // This is an internal node: if it has an entity, request despawn.
+                if let Some(e) = node.entity.take() {
+                    ops.push(DeltaOp::Despawn(e));
+                }
+                // Recurse into children.
+                for child in children.iter_mut() {
+                    recurse(child, ops);
+                }
+            } else {
+                // Leaf node: ensure it has a mesh entity queued.
+                if node.entity.is_none() {
+                    ops.push(DeltaOp::Spawn {
+                        cx:   node.cx,
+                        cz:   node.cz,
+                        half: node.half,
+                        slot: node as *mut QuadNode as usize,
+                    });
+                }
+            }
+        }
+
+        recurse(&mut self.root, &mut ops);
         ops
     }
 

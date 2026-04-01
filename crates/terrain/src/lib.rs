@@ -23,10 +23,16 @@ pub mod quadtree;
 use bevy::{
     pbr::wireframe::{Wireframe, WireframePlugin},
     prelude::*,
+    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
     tasks::{futures_lite::future, AsyncComputeTaskPool, Task},
 };
+use bevy::render::mesh::VertexAttributeValues;
 
-use geodata::GeoCache;
+use geodata::{
+    GeoCache,
+    tile::{flat_to_lat_lon, lat_lon_to_tile_xy, zoom_for_half},
+};
+use crate::quadtree::ROOT_HALF;
 use quadtree::{DeltaOp, QuadTree};
 use tile_mesh::build_tile_mesh;
 
@@ -47,6 +53,10 @@ pub struct TerrainConfig {
     pub centre_lat: f64,
     /// WGS-84 longitude of the world origin (degrees).
     pub centre_lon: f64,
+    /// When true, force the quad-tree to full subdivision and render only
+    /// the highest-resolution leaf tiles (useful for image-alignment
+    /// debugging with the top-down camera).
+    pub force_max_res: bool,
 }
 
 impl Default for TerrainConfig {
@@ -58,6 +68,7 @@ impl Default for TerrainConfig {
             geo_cache:   None,
             centre_lat:  geodata::CENTRE_LAT,
             centre_lon:  geodata::CENTRE_LON,
+            force_max_res: false,
         }
     }
 }
@@ -67,15 +78,18 @@ impl Default for TerrainConfig {
 #[derive(Resource)]
 pub struct TerrainState {
     pub tree:              QuadTree,
+    /// Fallback material for tiles without a satellite texture.
     pub material:          Handle<StandardMaterial>,
-    /// Last value of GeoCache::fetch_count() that triggered a tree rebuild.
+    // ── Elevation debounce ─────────────────────────────────────────────────
     pub last_geodata_gen:  u32,
-    /// Most recently observed fetch_count (may be ahead of last_geodata_gen).
     pending_geodata_gen:   u32,
-    /// Frames for which pending_geodata_gen has been stable (debounce counter).
     geodata_stable_frames: u32,
-    /// Post-rebuild cooldown: no new rebuild until this reaches 0.
     rebuild_cooldown:      u32,
+    // ── Imagery debounce ─────────────────────────────────────────────────
+    last_imagery_gen:      u32,
+    pending_imagery_gen:   u32,
+    imagery_stable_frames: u32,
+    imagery_cooldown:      u32,
 }
 
 // ── Marker component ─────────────────────────────────────────────────────────
@@ -83,9 +97,12 @@ pub struct TerrainState {
 #[derive(Component)]
 pub struct TerrainTile;
 
-/// Holds an in-flight async mesh-build task; replaced by the full tile once done.
+/// Holds an in-flight async task that builds the mesh and optionally fetches
+/// a satellite imagery tile.  The `Vec<u8>` is 256×256 RGBA8 if available.
+/// When present the imagery is returned alongside the Web-Mercator tile
+/// coordinates `(tx, ty, z)` that were used to generate it.
 #[derive(Component)]
-pub struct TerrainBuildTask(pub Task<Mesh>);
+pub struct TerrainBuildTask(pub Task<(Mesh, Option<(Vec<u8>, i32, i32, u32)>)>);
 
 /// Marks a tile slot (or task entity) that should be despawned once it is safe
 /// to do so — i.e. after any in-flight build task has been resolved.
@@ -118,13 +135,22 @@ impl Plugin for TerrainPlugin {
             .init_resource::<TerrainConfig>()
             .init_resource::<TerrainDebug>()
             .add_systems(Startup, setup_terrain)
-            .add_systems(Update, (update_terrain, poll_terrain_tasks, despawn_stale_tiles, watch_geodata_loads, toggle_wireframe));
+            .add_systems(Update, (
+                update_terrain,
+                poll_terrain_tasks,
+                despawn_stale_tiles,
+                watch_geodata_loads,
+                watch_imagery_loads,
+                toggle_wireframe,
+            ));
     }
 }
 
 fn setup_terrain(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    cfg: Res<TerrainConfig>,
+    mut debug: ResMut<TerrainDebug>,
 ) {
     let material = materials.add(StandardMaterial {
         base_color: Color::WHITE,
@@ -133,13 +159,25 @@ fn setup_terrain(
         ..default()
     });
 
+    // Enable wireframe by default during debugging so tile boundaries show.
+    debug.wireframe = true;
+
+    let mut tree = QuadTree::new();
+    if cfg.force_max_res {
+        tree.force_max_depth();
+    }
+
     commands.insert_resource(TerrainState {
-        tree:                  QuadTree::new(),
+        tree,
         material,
         last_geodata_gen:      0,
         pending_geodata_gen:   0,
         geodata_stable_frames: 0,
         rebuild_cooldown:      0,
+        last_imagery_gen:      0,
+        pending_imagery_gen:   0,
+        imagery_stable_frames: 0,
+        imagery_cooldown:      0,
     });
 }
 
@@ -154,7 +192,11 @@ fn update_terrain(
         .map(|gt| gt.translation())
         .unwrap_or(Vec3::ZERO);
 
-    let ops = state.tree.update(cam_pos.x, cam_pos.z);
+    let ops = if cfg.force_max_res {
+        state.tree.update_force_leaves()
+    } else {
+        state.tree.update(cam_pos.x, cam_pos.z)
+    };
     let pool = AsyncComputeTaskPool::get();
 
     for op in ops {
@@ -165,8 +207,11 @@ fn update_terrain(
             }
             DeltaOp::Spawn { cx, cz, half, slot } => {
                 let cfg_clone = cfg.clone();
-                let task: Task<Mesh> =
-                    pool.spawn(async move { build_tile_mesh(cx, cz, half, &cfg_clone) });
+                let task: Task<(Mesh, Option<(Vec<u8>, i32, i32, u32)>)> = pool.spawn(async move {
+                    let mesh    = build_tile_mesh(cx, cz, half, &cfg_clone);
+                    let imagery = sample_imagery(cx, cz, half, &cfg_clone);
+                    (mesh, imagery)
+                });
                 let entity = commands.spawn(TerrainBuildTask(task)).id();
                 state.tree.assign_entity(slot, entity);
             }
@@ -175,23 +220,82 @@ fn update_terrain(
 }
 
 /// Promote completed mesh-build tasks to full tile entities.
+///
+/// When the task also returned RGBA satellite imagery, creates a unique
+/// `StandardMaterial` with a satellite texture for that tile.  Otherwise
+/// falls back to the shared altitude-colour material.
 fn poll_terrain_tasks(
-    state:        Res<TerrainState>,
-    debug:        Res<TerrainDebug>,
-    mut commands: Commands,
-    mut meshes:   ResMut<Assets<Mesh>>,
-    mut query:    Query<(Entity, &mut TerrainBuildTask, Option<&TileDespawnPending>)>,
+    state:         Res<TerrainState>,
+    debug:         Res<TerrainDebug>,
+    mut commands:  Commands,
+    mut meshes:    ResMut<Assets<Mesh>>,
+    mut images:    ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut query:     Query<(Entity, &mut TerrainBuildTask, Option<&TileDespawnPending>)>,
 ) {
     for (entity, mut task, despawn_pending) in query.iter_mut() {
-        if let Some(mesh) = future::block_on(future::poll_once(&mut task.0)) {
+            if let Some((mesh, rgba_opt)) = future::block_on(future::poll_once(&mut task.0)) {
             if despawn_pending.is_some() {
                 // The tile slot was evicted before the mesh finished — discard.
                 commands.entity(entity).despawn_recursive();
             } else {
+                // Log mesh vertex positions and UVs for debugging alignment.
+                if let Some(pos_attr) = mesh.attribute(bevy::render::mesh::Mesh::ATTRIBUTE_POSITION) {
+                    if let VertexAttributeValues::Float32x3(pts) = pos_attr {
+                        let mut xmin = f32::INFINITY; let mut xmax = f32::NEG_INFINITY;
+                        let mut ymin = f32::INFINITY; let mut ymax = f32::NEG_INFINITY;
+                        let mut zmin = f32::INFINITY; let mut zmax = f32::NEG_INFINITY;
+                        for p in pts.iter() {
+                            xmin = xmin.min(p[0]); xmax = xmax.max(p[0]);
+                            ymin = ymin.min(p[1]); ymax = ymax.max(p[1]);
+                            zmin = zmin.min(p[2]); zmax = zmax.max(p[2]);
+                        }
+                        println!(
+                            "[terrain] mesh pos bounds x=({:.2}..{:.2}) y=({:.2}..{:.2}) z=({:.2}..{:.2}) verts={}",
+                            xmin, xmax, ymin, ymax, zmin, zmax, pts.len()
+                        );
+                    }
+                }
+                if let Some(uv_attr) = mesh.attribute(bevy::render::mesh::Mesh::ATTRIBUTE_UV_0) {
+                    if let VertexAttributeValues::Float32x2(uvs) = uv_attr {
+                        let sample_count = uvs.len().min(6);
+                        let samples: Vec<String> = uvs.iter().take(sample_count).map(|uv| format!("({:.3},{:.3})", uv[0], uv[1])).collect();
+                        println!("[terrain] mesh uv samples: {}", samples.join(", "));
+                    }
+                }
+
+                let mat_handle = if let Some((rgba, tx, ty, z)) = rgba_opt {
+                    // Build a per-tile material backed by the satellite texture.
+                    let img = Image::new(
+                        Extent3d { width: 256, height: 256, depth_or_array_layers: 1 },
+                        TextureDimension::D2,
+                        rgba,
+                        TextureFormat::Rgba8UnormSrgb,
+                        bevy::render::render_asset::RenderAssetUsages::RENDER_WORLD,
+                    );
+                    let tex = images.add(img);
+                    // Log the Web-Mercator tile coordinates applied to this tile.
+                    println!("[terrain] applied imagery z={}/x={}/y={}", z, tx, ty);
+                    materials.add(StandardMaterial {
+                        base_color_texture: Some(tex),
+                        // Make the satellite quad unlit and double-sided so it's
+                        // clearly visible during top-down debug sessions.
+                        unlit: true,
+                        double_sided: true,
+                        cull_mode: None,
+                        perceptual_roughness: 0.9,
+                        reflectance: 0.1,
+                        ..default()
+                    })
+                } else {
+                    // No imagery yet — use the shared altitude-colour material.
+                    state.material.clone()
+                };
+
                 let mut ec = commands.entity(entity);
                 ec.remove::<TerrainBuildTask>().insert((
                     Mesh3d(meshes.add(mesh)),
-                    MeshMaterial3d(state.material.clone()),
+                    MeshMaterial3d(mat_handle),
                     Transform::default(),
                     TerrainTile,
                 ));
@@ -232,6 +336,29 @@ const GEODATA_DEBOUNCE_FRAMES: u32 = 120; // ≈ 2 s at 60 fps
 /// Minimum frames between successive tree rebuilds.
 const REBUILD_COOLDOWN_FRAMES: u32 = 300; // ≈ 5 s at 60 fps
 
+// ── Satellite imagery helper ───────────────────────────────────────────────────
+
+/// Try to get satellite imagery for the terrain tile centred at `(cx, cz)`
+/// with half-size `half`.  Returns the 256×256 RGBA8 bytes if the tile is
+/// already in the memory cache; otherwise fires a background fetch and
+/// returns `None` (the tree will rebuild when the fetch completes).
+fn sample_imagery(cx: f32, cz: f32, half: f32, cfg: &TerrainConfig) -> Option<(Vec<u8>, i32, i32, u32)> {
+    let cache = cfg.geo_cache.as_ref()?;
+    // Choose zoom based on this tile's half-size so the selected Web-Mercator
+    // zoom corresponds to the terrain tile resolution.  Matches the example
+    // stitcher which anchors the global grid at the root origin.
+    let zoom = zoom_for_half(half, cfg.centre_lat);
+
+    // Anchor sampling at the tile centre.  This avoids column shifts when
+    // corners fall near Web-Mercator tile boundaries and produces a
+    // contiguous tile sequence for the mosaic (matches
+    // `stitch_mosaic_center` example).
+    let (lat, lon) = flat_to_lat_lon(cx, cz, cfg.centre_lat, cfg.centre_lon);
+    let (tx, ty) = lat_lon_to_tile_xy(lat, lon, zoom);
+    let tile = cache.get_imagery_tile_nonblocking(tx, ty, zoom)?;
+    Some((tile.rgba.clone(), tx, ty, zoom))
+}
+
 /// When new elevation tiles have been loaded into the GeoCache, reset the
 /// quad-tree so all tiles rebuild with real heights.  Only fires once the
 /// tile build queue is empty so initial flat tiles are always visible first.
@@ -248,6 +375,12 @@ fn watch_geodata_loads(
     }
 
     let Some(ref cache) = cfg.geo_cache else { return; };
+    // In debug 'force max resolution' mode we don't want automatic resets
+    // to collapse the tree back to a coarse parent — keep the forced
+    // highest-resolution leaves intact until the mode is disabled.
+    if cfg.force_max_res {
+        return;
+    }
     let current = cache.fetch_count();
 
     if current == state.last_geodata_gen {
@@ -275,6 +408,75 @@ fn watch_geodata_loads(
     state.last_geodata_gen      = current;
     state.geodata_stable_frames = 0;
     state.rebuild_cooldown      = REBUILD_COOLDOWN_FRAMES;
+
+    for op in state.tree.reset() {
+        if let crate::quadtree::DeltaOp::Despawn(e) = op {
+            commands.entity(e).insert((TileDespawnPending, TileDespawnDelay(TILE_DESPAWN_DELAY_FRAMES)));
+        }
+    }
+
+    // If we're in debug 'force max resolution' mode, re-subdivide the
+    // cleared tree so subsequent updates will spawn highest-resolution
+    // leaf tiles instead of leaving a single root tile.
+    if cfg.force_max_res {
+        state.tree.force_max_depth();
+    }
+
+    // If we're in debug 'force max resolution' mode, re-subdivide the
+    // cleared tree so subsequent updates will spawn highest-resolution
+    // leaf tiles instead of leaving a single root tile.
+    if cfg.force_max_res {
+        state.tree.force_max_depth();
+    }
+}
+
+/// Mirror of `watch_geodata_loads` for satellite imagery.
+///
+/// Once imagery tiles finish downloading (detected via `imagery_fetch_count`),
+/// the quad-tree is reset so tiles are respawned with satellite textures.
+fn watch_imagery_loads(
+    cfg:          Res<TerrainConfig>,
+    mut state:    ResMut<TerrainState>,
+    mut commands: Commands,
+    building:     Query<&TerrainBuildTask>,
+) {
+    if state.imagery_cooldown > 0 {
+        state.imagery_cooldown -= 1;
+        return;
+    }
+
+    let Some(ref cache) = cfg.geo_cache else { return; };
+    // When `force_max_res` is enabled we deliberately avoid resetting the
+    // quad-tree in response to imagery arrivals so the high-resolution
+    // mosaic remains stable for visual comparison/debugging.
+    if cfg.force_max_res {
+        return;
+    }
+    let current = cache.imagery_fetch_count();
+
+    if current == state.last_imagery_gen {
+        state.imagery_stable_frames = 0;
+        return;
+    }
+
+    if current != state.pending_imagery_gen {
+        state.pending_imagery_gen   = current;
+        state.imagery_stable_frames = 0;
+        return;
+    }
+
+    state.imagery_stable_frames += 1;
+    if state.imagery_stable_frames < GEODATA_DEBOUNCE_FRAMES {
+        return;
+    }
+
+    if !building.is_empty() {
+        return;
+    }
+
+    state.last_imagery_gen      = current;
+    state.imagery_stable_frames = 0;
+    state.imagery_cooldown      = REBUILD_COOLDOWN_FRAMES;
 
     for op in state.tree.reset() {
         if let crate::quadtree::DeltaOp::Despawn(e) = op {
