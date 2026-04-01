@@ -1,5 +1,5 @@
 use avian3d::prelude::*;
-use bevy::input::gamepad::{Gamepad, GamepadAxis};
+use bevy::input::gamepad::{Gamepad, GamepadAxis, GamepadButton};
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use fdm::atmo::atmosphere;
@@ -44,6 +44,7 @@ fn main() {
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(PilotControls::default())
         .insert_resource(JoystickActive::default())
+        .insert_resource(AxisLogTimer(Timer::from_seconds(1.0, TimerMode::Repeating)))
         .add_systems(Startup, (setup, spawn_labeled_tiles, setup_hud))
         .add_systems(Update, (
             follow_camera,
@@ -51,6 +52,7 @@ fn main() {
             mouse_controls.after(joystick_controls),
             apply_aerodynamics,
             update_hud,
+            log_gamepad_axes,
         ))
         .run();
 }
@@ -565,6 +567,87 @@ fn follow_camera(
     cam.look_at(look_target, Vec3::Y);
 }
 
+// ── Gamepad axis logger ───────────────────────────────────────────────────────
+//
+// Prints all axis values once per second so we can identify the throttle slider.
+// Remove or gate behind a feature flag once the mapping is confirmed.
+
+#[derive(Resource)]
+struct AxisLogTimer(Timer);
+
+fn log_gamepad_axes(
+    gamepads: Query<&Gamepad>,
+    mut timer: ResMut<AxisLogTimer>,
+    time: Res<Time>,
+) {
+    if !timer.0.tick(time.delta()).just_finished() { return; }
+    let Ok(gp) = gamepads.get_single() else { return; };
+
+    let named: &[(&str, GamepadAxis)] = &[
+        ("LeftStickX",  GamepadAxis::LeftStickX),
+        ("LeftStickY",  GamepadAxis::LeftStickY),
+        ("LeftZ",       GamepadAxis::LeftZ),
+        ("RightStickX", GamepadAxis::RightStickX),
+        ("RightStickY", GamepadAxis::RightStickY),
+        ("RightZ",      GamepadAxis::RightZ),
+    ];
+    let mut any = false;
+    for (name, axis) in named {
+        if let Some(v) = gp.get(*axis) {
+            if v.abs() > 0.001 {
+                println!("  axis {:>12}: {:+.3}", name, v);
+                any = true;
+            }
+        }
+    }
+    for i in 0u8..10 {
+        if let Some(v) = gp.get(GamepadAxis::Other(i)) {
+            if v.abs() > 0.001 {
+                println!("  axis   Other({:>2}): {:+.3}", i, v);
+                any = true;
+            }
+        }
+    }
+
+    let buttons: &[(&str, GamepadButton)] = &[
+        ("South",        GamepadButton::South),
+        ("East",         GamepadButton::East),
+        ("North",        GamepadButton::North),
+        ("West",         GamepadButton::West),
+        ("LeftTrigger",  GamepadButton::LeftTrigger),
+        ("LeftTrigger2", GamepadButton::LeftTrigger2),
+        ("RightTrigger", GamepadButton::RightTrigger),
+        ("RightTrig2",   GamepadButton::RightTrigger2),
+        ("Select",       GamepadButton::Select),
+        ("Start",        GamepadButton::Start),
+        ("Mode",         GamepadButton::Mode),
+        ("LeftThumb",    GamepadButton::LeftThumb),
+        ("RightThumb",   GamepadButton::RightThumb),
+        ("DPadUp",       GamepadButton::DPadUp),
+        ("DPadDown",     GamepadButton::DPadDown),
+        ("DPadLeft",     GamepadButton::DPadLeft),
+        ("DPadRight",    GamepadButton::DPadRight),
+    ];
+    for (name, btn) in buttons {
+        if let Some(v) = gp.get(*btn) {
+            if v.abs() > 0.001 {
+                println!("   btn {:>12}: {:+.3}", name, v);
+                any = true;
+            }
+        }
+    }
+    for i in 0u8..16 {
+        if let Some(v) = gp.get(GamepadButton::Other(i)) {
+            if v.abs() > 0.001 {
+                println!("   btn   Other({:>2}): {:+.3}", i, v);
+                any = true;
+            }
+        }
+    }
+
+    if any { println!(); }
+}
+
 // ── Joystick controls (Thrustmaster T16000M) ─────────────────────────────────
 //
 // Axis mapping (gilrs / Linux SDL2 database for T16000M):
@@ -613,9 +696,18 @@ fn joystick_controls(
     if let Some(v) = gamepad.get(GamepadAxis::RightZ) {
         controls.rudder = scale(-v, MAX_RUD_DEF);
     }
-    // Throttle slider: LeftZ, range -1 (max) to +1 (idle).
-    if let Some(v) = gamepad.get(GamepadAxis::LeftZ) {
-        controls.throttle = ((1.0 - v) / 2.0) as f64;
+    // Throttle slider: LeftZ — disabled, resets DPad value.
+    // if let Some(v) = gamepad.get(GamepadAxis::LeftZ) {
+    //     controls.throttle = ((1.0 - v) / 2.0) as f64;
+    // }
+
+    // DPad Up / Down: step throttle by 5% per press.
+    const THROTTLE_STEP: f64 = 0.05;
+    if gamepad.just_pressed(GamepadButton::DPadUp) {
+        controls.throttle = (controls.throttle + THROTTLE_STEP).clamp(0.0, 1.0);
+    }
+    if gamepad.just_pressed(GamepadButton::DPadDown) {
+        controls.throttle = (controls.throttle - THROTTLE_STEP).clamp(0.0, 1.0);
     }
 }
 
