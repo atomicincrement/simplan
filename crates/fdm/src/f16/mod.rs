@@ -9,7 +9,7 @@
 //! # Quick start
 //!
 //! ```rust
-//! use fdm::f35::{FlightModel, Controls};
+//! use fdm::f16::{FlightModel, Controls};
 //!
 //! // 10 000 ft, Mach 0.5 (≈ 556 ft/s), heading East
 //! let mut fdm = FlightModel::new(10_000.0, 556.0, std::f64::consts::FRAC_PI_2);
@@ -57,7 +57,7 @@ pub const IZZ: f64 = 63_100.0;
 pub const IXZ: f64 = 982.0;
 
 /// F-16A mass properties (pre-computed once).
-pub const F35_MASS_PROPS: MassProps = MassProps::new(
+pub const F16_MASS_PROPS: MassProps = MassProps::new(
     MASS, IXX, IYY, IZZ, IXZ,
 );
 
@@ -146,7 +146,7 @@ impl FlightModel {
             build_loads(s, &surfs, throttle, prev_alpha, dt)
         };
 
-        let mut next = rk4_step(&self.state, dt, &F35_MASS_PROPS, loads_fn);
+        let mut next = rk4_step(&self.state, dt, &F16_MASS_PROPS, loads_fn);
 
         // Update load-factor (nz) from aero output at the new state.
         let atmo    = atmo::atmosphere(next.altitude);
