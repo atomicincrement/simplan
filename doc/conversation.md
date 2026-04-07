@@ -158,3 +158,9 @@ Wire-up in `crates/sim`:
   - Each job installs the required Rust target, caches the Cargo registry and `target/`, installs Linux system deps (`libasound2-dev libudev-dev libxkbcommon-dev pkg-config`), builds the `simplan` package in `--release` mode, stages the binary + `assets/` + `README.md`, and produces a `.tar.gz` (Unix) or `.zip` (Windows) artifact.
   - A dependent `release` job downloads all artifacts and publishes a GitHub Release with auto-generated notes via `softprops/action-gh-release`.
 - Moved `bevy/dynamic_linking` out of the hard `[dependencies]` features list in `crates/sim/Cargo.toml` and into an optional `dev` Cargo feature so release builds are statically linked. Local development: `cargo run --features dev`.
+
+## 2026-04-07 – Crates.io research: geodata / terrain
+
+**User:** Research existing Rust crates covering (1) fetching/caching slippy-map elevation & imagery tiles and (2) LOD terrain rendering in Bevy.
+
+**Action:** Fetched crates.io search results and individual crate pages for `terrain bevy`, `elevation tiles`, `slippy map tiles`, `terrain rgb mapbox`, and the individual crates `bevy_mesh_terrain`, `bevy_symbios_ground`, `bevy_slippy_tiles`, `bevy_geo_tiles`, `nasadem`, `htg`, `massif`, `rgb2slope`, `degen_toon_terrain`. Compiled findings — see assistant response in conversation.

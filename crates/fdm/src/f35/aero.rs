@@ -1,22 +1,19 @@
-//! F-35A aerodynamic model.
+//! F-16A aerodynamic model.
 //!
-//! **Coordinate frame** (JSBSim convention, shared with the C172 module):
+//! Data are taken verbatim from the JSBSim F-16 model
+//! (`aircraft/f16/f16.xml`, Aeromatic v0.8 / Nguyen et al. NASA TM-1979).
+//!
+//! **Coordinate frame** (JSBSim convention):
 //! - Body:  X forward, Y right, Z down.
-//! - Wind:  X along aerodynamic velocity, Y right, Z down-ish.
-//! - Forces are assembled in DRAG / SIDE / LIFT wind-frame axes then
-//!   transformed to body frame via [`crate::math::dcm_wind2body`].
-//! - Moments are assembled directly in body-frame ROLL / PITCH / YAW.
+//! - Wind frame forces: DRAG (+X), SIDE (+Y), LIFT (+Z-down).
+//! - Forces assembled in wind frame then rotated to body via
+//!   [`crate::math::dcm_wind2body`].
+//! - Moments assembled directly in body frame (L, M, N).
 //!
-//! **Reference geometry (F-35A, public domain):**
-//! - Wing area   S = 460 ft²
-//! - Wingspan    b = 35.0 ft
-//! - MAC         c̄ = 15.8 ft
-//! - AR          = b²/S ≈ 2.66  (low-AR cranked-delta planform)
-//!
-//! **Data sources:**
-//! Aerodynamic coefficients are estimated from open-source reports, DATCOM
-//! estimates for similar delta-wing / blended-body fighters (F-16 JSBSim
-//! reference, Nguyen et al. NASA TM-1979), and public-domain F-35 references.
+//! **Reference geometry (F-16A from JSBSim):**
+//! - Wing area   S  = 300 ft²
+//! - Wingspan    b  = 30.0 ft
+//! - MAC         c̄  = 11.32 ft
 //!
 //! **Units:** Imperial (ft, slug, lbf, s, rad) throughout.
 
@@ -24,92 +21,259 @@ use crate::math::{dcm_wind2body, interp1, Vec3};
 
 // ── Reference geometry ───────────────────────────────────────────────────────
 
-pub const WING_AREA: f64 = 460.0; // ft²  – S
-pub const WINGSPAN:  f64 =  35.0; // ft   – b
-pub const CHORD:     f64 =  15.8; // ft   – c̄ (mean aerodynamic chord)
+pub const WING_AREA: f64 = 300.0;  // ft²  – S
+pub const WINGSPAN:  f64 =  30.0;  // ft   – b
+pub const CHORD:     f64 =  11.32; // ft   – c̄ (mean aerodynamic chord)
 
-// ── Mach-varying CD0 (wave-drag rise through transonic regime) ───────────────
+// ── Common alpha breakpoints (12 rows, shared by every table) ─────────────────
+//
+//  Matches the JSBSim XML: -10° … +45° in 5° steps.
 
-/// Base zero-lift drag vs. Mach number.
-const CD0_MACH: &[(f64, f64)] = &[
-    (0.0,  0.0240),
-    (0.6,  0.0240),
-    (0.85, 0.0265),
-    (0.95, 0.0340),
-    (1.05, 0.0420),
-    (1.20, 0.0390),
-    (1.60, 0.0340),
-    (2.00, 0.0300),
+const ALPHA_BREAKS: [f64; 12] = [
+    -0.1750, -0.0870,  0.0000,  0.0870,
+     0.1750,  0.2620,  0.3490,  0.4360,
+     0.5240,  0.6110,  0.6980,  0.7850,
 ];
 
-// ── Lift curve (CL vs. alpha) clean ─────────────────────────────────────────
+// ── Elevator breakpoints (5 columns) ─────────────────────────────────────────
 //
-//  F-35A cranked-delta: powerful LERX delays stall to ~35° (0.61 rad).
-//  CL_alpha ≈ 3.2 /rad, CL_max ≈ 1.6 at α ≈ 0.40 rad (23°).
+//  Positive elevator = nose-down deflection (JSBSim sign).
+//  Our Controls convention uses positive elevator = nose-UP command; the
+//  caller negates before looking up.
 
-/// Lift curve (CL vs alpha_rad), clean configuration.
+const DE_BREAKS: [f64; 5] = [-0.4360, -0.2180, 0.0000, 0.2180, 0.4360];
+
+// ── 2-D bilinear interpolation helper ────────────────────────────────────────
+
+/// Bilinear table lookup for a row-major `[[f64; C]; R]` array.
+fn bl<const R: usize, const C: usize>(
+    row_keys: &[f64; R],
+    col_keys: &[f64; C],
+    data:     &[[f64; C]; R],
+    rval:     f64,
+    cval:     f64,
+) -> f64 {
+    let ri = {
+        let mut i = 0;
+        while i < R - 1 && row_keys[i + 1] < rval { i += 1; }
+        i.min(R - 2)
+    };
+    let ci = {
+        let mut i = 0;
+        while i < C - 1 && col_keys[i + 1] < cval { i += 1; }
+        i.min(C - 2)
+    };
+    let tr = if row_keys[ri + 1] != row_keys[ri] {
+        ((rval - row_keys[ri]) / (row_keys[ri + 1] - row_keys[ri])).clamp(0.0, 1.0)
+    } else { 0.0 };
+    let tc = if col_keys[ci + 1] != col_keys[ci] {
+        ((cval - col_keys[ci]) / (col_keys[ci + 1] - col_keys[ci])).clamp(0.0, 1.0)
+    } else { 0.0 };
+    let v0 = data[ri    ][ci] + tc * (data[ri    ][ci + 1] - data[ri    ][ci]);
+    let v1 = data[ri + 1][ci] + tc * (data[ri + 1][ci + 1] - data[ri + 1][ci]);
+    v0 + tr * (v1 - v0)
+}
+
+// ── LIFT:  CL(alpha, de)  ─────────────────────────────────────────────────────
+//
+//  Source: `aero/coefficient/CLDh`, JSBSim F-16 model.
+
+const CL_TABLE: [[f64; 5]; 12] = [
+    // de: -0.436  -0.218   0.000   0.218   0.436
+    [-0.6590, -0.7090, -0.7540, -0.7920, -0.8250],  // α = -10°
+    [-0.1510, -0.1960, -0.2380, -0.2780, -0.3160],  // α =  -5°
+    [ 0.1830,  0.1410,  0.1000,  0.0590,  0.0170],  // α =   0°
+    [ 0.4910,  0.4540,  0.4140,  0.3710,  0.3260],  // α =   5°
+    [ 0.7970,  0.7630,  0.7250,  0.6800,  0.6300],  // α =  10°
+    [ 1.1080,  1.0790,  1.0410,  0.9930,  0.9400],  // α =  15°
+    [ 1.3950,  1.3660,  1.3270,  1.2740,  1.2140],  // α =  20°
+    [ 1.6150,  1.5870,  1.5470,  1.4900,  1.4270],  // α =  25°
+    [ 1.8040,  1.7770,  1.7370,  1.6740,  1.6100],  // α =  30°
+    [ 1.9000,  1.8720,  1.8290,  1.7660,  1.6990],  // α =  35°
+    [ 1.8980,  1.8690,  1.8220,  1.7570,  1.6890],  // α =  40°
+    [ 1.7530,  1.7240,  1.6740,  1.6120,  1.5460],  // α =  45°
+];
+
+// ── DRAG:  CD(alpha, de)  ─────────────────────────────────────────────────────
+//
+//  Source: `aero/coefficient/CDDh`.
+
+const CD_TABLE: [[f64; 5]; 12] = [
+    // de: -0.436  -0.218   0.000   0.218   0.436
+    [ 0.2170,  0.1740,  0.1560,  0.1810,  0.2300],
+    [ 0.0940,  0.0550,  0.0410,  0.0620,  0.1010],
+    [ 0.0810,  0.0400,  0.0210,  0.0390,  0.0760],
+    [ 0.1060,  0.0610,  0.0400,  0.0570,  0.1010],
+    [ 0.1660,  0.1190,  0.0960,  0.1140,  0.1580],
+    [ 0.2520,  0.2030,  0.1820,  0.2020,  0.2400],
+    [ 0.4040,  0.3620,  0.3470,  0.3710,  0.4160],
+    [ 0.6280,  0.5880,  0.5770,  0.6010,  0.6370],
+    [ 0.8750,  0.8400,  0.8260,  0.8520,  0.8800],
+    [ 1.1270,  1.0950,  1.0840,  1.1020,  1.1250],
+    [ 1.3650,  1.3340,  1.3260,  1.3380,  1.3560],
+    [ 1.5170,  1.4870,  1.4780,  1.4820,  1.4890],
+];
+
+// ── PITCH MOMENT:  Cm(alpha, de)  ────────────────────────────────────────────
+//
+//  Source: `aero/coefficient/CmDh`.
+
+const CM_TABLE: [[f64; 5]; 12] = [
+    // de: -0.436  -0.218   0.000   0.218   0.436
+    [ 0.2050,  0.0810, -0.0460, -0.1740, -0.2590],
+    [ 0.1680,  0.0770, -0.0200, -0.1450, -0.2020],
+    [ 0.1860,  0.1070, -0.0090, -0.1210, -0.1840],
+    [ 0.1960,  0.1100, -0.0050, -0.1270, -0.1930],
+    [ 0.2130,  0.1100, -0.0060, -0.1290, -0.1990],
+    [ 0.2510,  0.1410,  0.0100, -0.1020, -0.1500],
+    [ 0.2450,  0.1270,  0.0060, -0.0970, -0.1600],
+    [ 0.2380,  0.1190, -0.0010, -0.1130, -0.1670],
+    [ 0.2520,  0.1330,  0.0140, -0.0870, -0.1040],
+    [ 0.2310,  0.1080,  0.0000, -0.0840, -0.0760],
+    [ 0.1980,  0.0810, -0.0130, -0.0690, -0.0410],
+    [ 0.1920,  0.0930,  0.0320, -0.0060, -0.0050],
+];
+
+// ── CD transonic wave-drag rise  ─────────────────────────────────────────────
+
+const CD_MACH: &[(f64, f64)] = &[
+    (0.00, 0.0000), (0.81, 0.0000), (1.10, 0.0230), (1.80, 0.0150),
+];
+
+// ── Pitch-rate lift:  CLq(alpha)  ─────────────────────────────────────────────
+
+const CLQ_ALPHA: &[(f64, f64)] = &[
+    (-0.1750,  8.7127), (-0.0870, 25.7114), ( 0.0000, 28.9000),
+    ( 0.0870, 31.3973), ( 0.1750, 31.0872), ( 0.2620, 30.4071),
+    ( 0.3490, 26.9735), ( 0.4360, 26.4242), ( 0.5240, 25.8647),
+    ( 0.6110, 25.2654), ( 0.6980, 30.5158), ( 0.7850, 25.8165),
+];
+
+// ── Pitch-rate moment:  Cmq(alpha)  ──────────────────────────────────────────
+
+const CMQ_ALPHA: &[(f64, f64)] = &[
+    (-0.1750, -7.2100), (-0.0870, -5.4000), ( 0.0000, -5.2300),
+    ( 0.0870, -5.2600), ( 0.1750, -6.1100), ( 0.2620, -6.6400),
+    ( 0.3490, -5.6900), ( 0.4360, -6.0000), ( 0.5240, -6.2000),
+    ( 0.6110, -6.4000), ( 0.6980, -6.6000), ( 0.7850, -6.0000),
+];
+
+// ── Side-force scalars  ───────────────────────────────────────────────────────
+
+const CY_BETA: f64 = -1.1460; // /rad  (CYb)
+const CY_DA:   f64 = -0.0226; // /rad  (CYDa)
+const CY_DR:   f64 =  0.0860; // /rad  (CYdr)
+
+// ── Side-force rate derivatives  ─────────────────────────────────────────────
+
+const CYP_ALPHA: &[(f64, f64)] = &[
+    (-0.1750, -0.1080), (-0.0870, -0.1080), ( 0.0000, -0.1880),
+    ( 0.0870,  0.1100), ( 0.1750,  0.2580), ( 0.2620,  0.2260),
+    ( 0.3490,  0.3440), ( 0.4360,  0.3620), ( 0.5240,  0.6110),
+    ( 0.6110,  0.5290), ( 0.6980,  0.2980), ( 0.7850, -0.2270),
+];
+
+const CYR_ALPHA: &[(f64, f64)] = &[
+    (-0.1750,  0.8820), (-0.0870,  0.8520), ( 0.0000,  0.8760),
+    ( 0.0870,  0.9580), ( 0.1750,  0.9620), ( 0.2620,  0.9740),
+    ( 0.3490,  0.8190), ( 0.4360,  0.4830), ( 0.5240,  0.5900),
+    ( 0.6110,  1.2100), ( 0.6980, -0.4930), ( 0.7850, -1.0400),
+];
+
+// ── Roll-moment derivatives  ──────────────────────────────────────────────────
+
+/// dCl/dβ slope (central difference of Clb(alpha,beta) table at β = ±0.087 rad).
+const CLB_SLOPE: &[(f64, f64)] = &[
+    (-0.1750, -0.0115), (-0.0870, -0.0460), ( 0.0000, -0.0920),
+    ( 0.0870, -0.1380), ( 0.1750, -0.1840), ( 0.2620, -0.2530),
+    ( 0.3490, -0.2530), ( 0.4360, -0.2410), ( 0.5240, -0.1720),
+    ( 0.6110, -0.0920), ( 0.6980, -0.1490), ( 0.7850, -0.1720),
+];
+
+const CLP_ALPHA: &[(f64, f64)] = &[
+    (-0.1750, -0.3600), (-0.0870, -0.3590), ( 0.0000, -0.4430),
+    ( 0.0870, -0.4200), ( 0.1750, -0.3830), ( 0.2620, -0.3750),
+    ( 0.3490, -0.3290), ( 0.4360, -0.2940), ( 0.5240, -0.2300),
+    ( 0.6110, -0.2100), ( 0.6980, -0.1200), ( 0.7850, -0.1000),
+];
+
+const CLR_ALPHA: &[(f64, f64)] = &[
+    (-0.1750, -0.1260), (-0.0870, -0.0260), ( 0.0000,  0.0630),
+    ( 0.0870,  0.1130), ( 0.1750,  0.2080), ( 0.2620,  0.2300),
+    ( 0.3490,  0.3190), ( 0.4360,  0.4370), ( 0.5240,  0.6800),
+    ( 0.6110,  0.1000), ( 0.6980,  0.4470), ( 0.7850, -0.3300),
+];
+
+/// Aileron roll effectiveness at β = 0.
+const CLDA_ALPHA: &[(f64, f64)] = &[
+    (-0.1750,  0.0400), (-0.0870,  0.0520), ( 0.0000,  0.0510),
+    ( 0.0870,  0.0520), ( 0.1750,  0.0480), ( 0.2620,  0.0480),
+    ( 0.3490,  0.0420), ( 0.4360,  0.0370), ( 0.5240,  0.0310),
+    ( 0.6110,  0.0260), ( 0.6980,  0.0170), ( 0.7850,  0.0120),
+];
+
+/// Rudder-to-roll cross-coupling at β = 0.
+const CLDR_ALPHA: &[(f64, f64)] = &[
+    (-0.1750,  0.0180), (-0.0870,  0.0150), ( 0.0000,  0.0150),
+    ( 0.0870,  0.0140), ( 0.1750,  0.0140), ( 0.2620,  0.0140),
+    ( 0.3490,  0.0140), ( 0.4360,  0.0150), ( 0.5240,  0.0130),
+    ( 0.6110,  0.0110), ( 0.6980,  0.0060), ( 0.7850,  0.0010),
+];
+
+// ── Yaw-moment derivatives  ───────────────────────────────────────────────────
+
+/// dCn/dβ slope (central difference of Cnb(alpha,beta) table at β = ±0.087 rad).
+const CNB_SLOPE: &[(f64, f64)] = &[
+    (-0.1750,  0.2069), (-0.0870,  0.2184), ( 0.0000,  0.2069),
+    ( 0.0870,  0.2184), ( 0.1750,  0.2184), ( 0.2620,  0.2069),
+    ( 0.3490,  0.1494), ( 0.4360,  0.0805), ( 0.5240,  0.0460),
+    ( 0.6110, -0.1609), ( 0.6980, -0.1954), ( 0.7850, -0.3793),
+];
+
+const CNP_ALPHA: &[(f64, f64)] = &[
+    (-0.1750, -0.0610), (-0.0870, -0.0520), ( 0.0000, -0.0520),
+    ( 0.0870,  0.0120), ( 0.1750,  0.0130), ( 0.2620,  0.0240),
+    ( 0.3490, -0.0500), ( 0.4360, -0.1500), ( 0.5240, -0.1300),
+    ( 0.6110, -0.1580), ( 0.6980, -0.2400), ( 0.7850, -0.1500),
+];
+
+const CNR_ALPHA: &[(f64, f64)] = &[
+    (-0.1750, -0.3800), (-0.0870, -0.3630), ( 0.0000, -0.3780),
+    ( 0.0870, -0.3860), ( 0.1750, -0.3700), ( 0.2620, -0.4530),
+    ( 0.3490, -0.5500), ( 0.4360, -0.5820), ( 0.5240, -0.5950),
+    ( 0.6110, -0.6370), ( 0.6980, -1.0200), ( 0.7850, -0.8400),
+];
+
+/// Adverse yaw due to aileron at β = 0.
+const CNDA_ALPHA: &[(f64, f64)] = &[
+    (-0.1750,  0.0110), (-0.0870,  0.0110), ( 0.0000,  0.0100),
+    ( 0.0870,  0.0090), ( 0.1750,  0.0080), ( 0.2620,  0.0060),
+    ( 0.3490,  0.0000), ( 0.4360, -0.0040), ( 0.5240, -0.0070),
+    ( 0.6110, -0.0100), ( 0.6980, -0.0040), ( 0.7850, -0.0100),
+];
+
+/// Rudder yaw authority at β = 0.
+const CNDR_ALPHA: &[(f64, f64)] = &[
+    (-0.1750, -0.0480), (-0.0870, -0.0450), ( 0.0000, -0.0450),
+    ( 0.0870, -0.0450), ( 0.1750, -0.0440), ( 0.2620, -0.0450),
+    ( 0.3490, -0.0470), ( 0.4360, -0.0480), ( 0.5240, -0.0490),
+    ( 0.6110, -0.0450), ( 0.6980, -0.0330), ( 0.7850, -0.0160),
+];
+
+// ── CL at de = 0 (for trim look-up) ──────────────────────────────────────────
+//
+//  Extracted from the de = 0.000 column of CL_TABLE.
+
 pub const CL_ALPHA_TABLE: &[(f64, f64)] = &[
-    (-0.26, -0.65),  // −15°
-    (-0.17, -0.43),  // −10°
-    (-0.09, -0.19),  //  −5°
-    ( 0.00,  0.10),  //   0°  (asymmetric body – slight positive lift at 0 α)
-    ( 0.09,  0.39),  //   5°
-    ( 0.17,  0.65),  //  10°
-    ( 0.26,  0.90),  //  15°
-    ( 0.35,  1.15),  //  20°
-    ( 0.44,  1.38),  //  25°
-    ( 0.52,  1.52),  //  30°
-    ( 0.61,  1.60),  //  35°  – near C_Lmax
-    ( 0.70,  1.45),  //  40°  – post-stall
-    ( 0.87,  1.10),  //  50°  – deep post-stall
+    (-0.1750, -0.7540), (-0.0870, -0.2380), ( 0.0000,  0.1000),
+    ( 0.0870,  0.4140), ( 0.1750,  0.7250), ( 0.2620,  1.0410),
+    ( 0.3490,  1.3270), ( 0.4360,  1.5470), ( 0.5240,  1.7370),
+    ( 0.6110,  1.8290), ( 0.6980,  1.8220), ( 0.7850,  1.6740),
 ];
 
-// ── Induced-drag factor k ────────────────────────────────────────────────────
-//
-//  CDi = k · CL²   where k = 1/(π·AR·e)
-//  AR = 2.66, e ≈ 0.80  →  k ≈ 0.150
+// ── Public API ────────────────────────────────────────────────────────────────
 
-const K_INDUCED: f64 = 0.150;
-
-// ── Elevator (pitch-channel elevon) effects on CL and CD ────────────────────
-
-const CL_DE: f64 = 0.25; // ΔCL per elevon radian
-const CD_DE: f64 = 0.040; // ΔCD per |elevon| radian (drag from deflection)
-
-// ── Side-force coefficients ──────────────────────────────────────────────────
-
-const CY_BETA: f64 = -0.90; // /rad
-const CY_DR:   f64 =  0.12; // /rad  rudder
-const CY_P:    f64 = -0.08; // per (b/2Vt)·p
-const CY_R:    f64 =  0.25; // per (b/2Vt)·r
-
-// ── Pitch-moment coefficients ────────────────────────────────────────────────
-
-const CM0:     f64 =  0.040; // zero-alpha / zero-elevator trim moment
-const CM_ALPHA:f64 = -0.300; // /rad   (FBW provides stability augmentation)
-const CM_Q:    f64 = -6.000; // per (c/2Vt)·q
-const CM_ADOT: f64 = -3.000; // per (c/2Vt)·α̇
-const CM_DE:   f64 = -0.900; // /rad  elevon to pitch moment
-
-// ── Roll-moment coefficients ─────────────────────────────────────────────────
-
-const CL_BETA: f64 = -0.060; // /rad  dihedral effect
-const CL_P:    f64 = -0.350; // per (b/2Vt)·p  roll damping
-const CL_R:    f64 =  0.060; // per (b/2Vt)·r
-const CL_DA:   f64 =  0.060; // /rad  differential elevon
-const CL_DR:   f64 =  0.005; // /rad  rudder cross-coupling
-
-// ── Yaw-moment coefficients ──────────────────────────────────────────────────
-
-const CN_BETA: f64 =  0.100; // /rad  directional stability
-const CN_P:    f64 = -0.030; // per (b/2Vt)·p
-const CN_R:    f64 = -0.120; // per (b/2Vt)·r  yaw damping
-const CN_DA:   f64 = -0.010; // /rad  aileron adverse yaw
-const CN_DR:   f64 = -0.060; // /rad  rudder
-
-// ── Public API ───────────────────────────────────────────────────────────────
-
-/// Aerodynamic output (forces and moments in the body frame).
+/// Aerodynamic output (forces and moments in body frame).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AeroOut {
     /// Total aerodynamic force in body frame [Fx, Fy, Fz] (lbf).
@@ -126,34 +290,35 @@ pub struct AeroOut {
     pub vt: f64,
 }
 
-/// Inputs to the F-35A aerodynamic model.
+/// Inputs to the F-16A aerodynamic model.
 #[derive(Debug, Clone, Copy)]
 pub struct AeroIn {
     /// Body-frame velocity relative to airmass (ft/s): [u, v, w].
     pub vel_aero: Vec3,
     /// Body angular rate (rad/s): [p, q, r].
     pub pqr: Vec3,
-    /// Alpha-dot (rad/s) from the previous integration step.
+    /// Alpha-dot (rad/s) from the previous integration step (reserved).
     pub alpha_dot: f64,
     /// Air density (slug/ft³).
     pub rho: f64,
     /// Speed of sound (ft/s).
     pub sound_speed: f64,
-    /// Elevon deflection for pitch (rad): positive = nose-up moment.
+    /// Elevator deflection (rad): positive = nose-UP moment (our convention;
+    /// negated internally before the JSBSim-convention table lookup).
     pub elevator_rad: f64,
-    /// Differential elevon for roll (rad): positive = roll right.
+    /// Differential aileron (rad): positive = roll right.
     pub aileron_rad: f64,
     /// Rudder deflection (rad): positive = yaw right.
     pub rudder_rad: f64,
 }
 
-/// Compute aerodynamic forces and moments for the F-35A.
+/// Compute aerodynamic forces and moments for the F-16A.
 pub fn aerodynamics(inp: &AeroIn) -> AeroOut {
     let u = inp.vel_aero.x;
     let v = inp.vel_aero.y;
     let w = inp.vel_aero.z;
 
-    // ── Basic flow quantities ─────────────────────────────────────────────
+    // ── Basic flow quantities ──────────────────────────────────────────────
     let u2w2 = u * u + w * w;
     let vt2  = u2w2 + v * v;
     let vt   = vt2.sqrt();
@@ -169,63 +334,58 @@ pub fn aerodynamics(inp: &AeroIn) -> AeroOut {
     let r = inp.pqr.z;
 
     let two_vt = 2.0 * vt.max(1.0);
-    let bi2vel = WINGSPAN / two_vt;  // b / (2 Vt)
-    let ci2vel = CHORD   / two_vt;  // c̄ / (2 Vt)
+    let bi2vel = WINGSPAN / two_vt;
+    let ci2vel = CHORD   / two_vt;
 
     let s = WING_AREA;
     let b = WINGSPAN;
     let c = CHORD;
 
-    // ── Drag ─────────────────────────────────────────────────────────────
-    let cd0    = interp1(CD0_MACH, mach);
-    let cl_raw = interp1(CL_ALPHA_TABLE, alpha); // for induced drag
-    let cd_i   = K_INDUCED * cl_raw * cl_raw;
-    let cd_de  = CD_DE * inp.elevator_rad.abs();
-    let cd_beta = 0.15 * beta.abs();
+    // Convert to JSBSim elevator convention (positive = nose-down trailing-edge-up).
+    let de_jsb = -inp.elevator_rad;
+    let da = inp.aileron_rad;
+    let dr = inp.rudder_rad;
 
-    let drag = qbar * s * (cd0 + cd_i + cd_de + cd_beta);
+    // ── LIFT ──────────────────────────────────────────────────────────────
+    let cl = bl(&ALPHA_BREAKS, &DE_BREAKS, &CL_TABLE, alpha, de_jsb)
+           + interp1(CLQ_ALPHA, alpha) * ci2vel * q;
 
-    // ── Side force ────────────────────────────────────────────────────────
+    // ── DRAG ──────────────────────────────────────────────────────────────
+    let cd = bl(&ALPHA_BREAKS, &DE_BREAKS, &CD_TABLE, alpha, de_jsb)
+           + interp1(CD_MACH, mach);
+
+    // ── SIDE FORCE ────────────────────────────────────────────────────────
     let cy = CY_BETA * beta
-           + CY_DR * inp.rudder_rad
-           + bi2vel * (CY_P * p + CY_R * r);
+           + CY_DA   * da
+           + CY_DR   * dr
+           + bi2vel  * (interp1(CYP_ALPHA, alpha) * p
+                      + interp1(CYR_ALPHA, alpha) * r);
 
-    let side = qbar * s * cy;
+    // ── Transform wind → body ──────────────────────────────────────────────
+    let f_wind     = Vec3::new(-cd, cy, -cl);
+    let force_body = qbar * s * dcm_wind2body(alpha, beta).mul_vec(f_wind);
 
-    // ── Lift ─────────────────────────────────────────────────────────────
-    let cl = interp1(CL_ALPHA_TABLE, alpha)
-           + CL_DE  * inp.elevator_rad
-           + ci2vel * inp.alpha_dot * 1.2  // α̇ lift
-           + ci2vel * q * 4.5;             // pitch-rate lift
-
-    let lift = qbar * s * cl;
-
-    // ── Transform wind → body ─────────────────────────────────────────────
-    let f_wind = Vec3::new(-drag, side, -lift);
-    let tw2b   = dcm_wind2body(alpha, beta);
-    let force_body = tw2b.mul_vec(f_wind);
-
-    // ── Pitch moment ──────────────────────────────────────────────────────
-    let cm = CM0
-           + CM_ALPHA * alpha
-           + CM_DE    * inp.elevator_rad
-           + ci2vel   * (CM_Q * q + CM_ADOT * inp.alpha_dot);
+    // ── PITCH MOMENT ──────────────────────────────────────────────────────
+    let cm = bl(&ALPHA_BREAKS, &DE_BREAKS, &CM_TABLE, alpha, de_jsb)
+           + interp1(CMQ_ALPHA, alpha) * ci2vel * q;
 
     let pitch_moment = qbar * s * c * cm;
 
-    // ── Roll moment ───────────────────────────────────────────────────────
-    let cl_moment = CL_BETA * beta
-                  + CL_DA   * inp.aileron_rad
-                  + CL_DR   * inp.rudder_rad
-                  + bi2vel  * (CL_P * p + CL_R * r);
+    // ── ROLL MOMENT ───────────────────────────────────────────────────────
+    let cl_m = interp1(CLB_SLOPE,  alpha) * beta
+             + interp1(CLDA_ALPHA, alpha) * da
+             + interp1(CLDR_ALPHA, alpha) * dr
+             + bi2vel * (interp1(CLP_ALPHA, alpha) * p
+                        + interp1(CLR_ALPHA, alpha) * r);
 
-    let roll_moment = qbar * s * b * cl_moment;
+    let roll_moment = qbar * s * b * cl_m;
 
-    // ── Yaw moment ────────────────────────────────────────────────────────
-    let cn = CN_BETA * beta
-           + CN_DA   * inp.aileron_rad
-           + CN_DR   * inp.rudder_rad
-           + bi2vel  * (CN_P * p + CN_R * r);
+    // ── YAW MOMENT ────────────────────────────────────────────────────────
+    let cn = interp1(CNB_SLOPE,  alpha) * beta
+           + interp1(CNDA_ALPHA, alpha) * da
+           + interp1(CNDR_ALPHA, alpha) * dr
+           + bi2vel * (interp1(CNP_ALPHA, alpha) * p
+                      + interp1(CNR_ALPHA, alpha) * r);
 
     let yaw_moment = qbar * s * b * cn;
 

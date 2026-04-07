@@ -1,16 +1,18 @@
-//! F-35A Lightning II – Flight Dynamics Model
+//! F-16A Lightning II – Flight Dynamics Model
 //!
-//! A 6-DoF rigid-body flight model for the F-35A.
-//! Shares the atmosphere, equations-of-motion, and math modules from the
-//! parent crate; only aerodynamics and propulsion are aircraft-specific.
+//! A 6-DoF rigid-body flight model for the F-16A.
+//! Aerodynamic data come from the JSBSim F-16 model
+//! (`aircraft/f16/f16.xml`, Nguyen et al. NASA TM-1979 wind-tunnel data).
+//! Engine data come from `engine/F100-PW-229.xml` (F100-PW-229 turbofan).
+//! Mass and inertia are from the JSBSim `<mass_balance>` block.
 //!
 //! # Quick start
 //!
 //! ```rust
 //! use fdm::f35::{FlightModel, Controls};
 //!
-//! // 10 000 ft, Mach 0.5 (≈ 889 ft/s), heading East
-//! let mut fdm = FlightModel::new(10_000.0, 889.0, std::f64::consts::FRAC_PI_2);
+//! // 10 000 ft, Mach 0.5 (≈ 556 ft/s), heading East
+//! let mut fdm = FlightModel::new(10_000.0, 556.0, std::f64::consts::FRAC_PI_2);
 //!
 //! let controls = Controls {
 //!     throttle: 0.60,   // military power
@@ -33,47 +35,44 @@ use crate::eom::{rk4_step, ExternalLoads, MassProps, State};
 use crate::math::Vec3;
 use aero::{AeroIn, WING_AREA};
 
-// ── F-35A mass properties ────────────────────────────────────────────────────
+// ── F-16A mass properties ────────────────────────────────────────────────────
 //
-//  Based on public F-35A data:
-//    Empty weight:  29,300 lb  (publicised)
-//    Pilot:            200 lb
-//    Internal fuel: 18,498 lb  (full tanks)
-//    50 % fuel load:  9,249 lb
-//  → Operating weight ≈ 38,749 lb → mass ≈ 1,204 slug
-//
-//  Moments of inertia are estimated from published geometry using mass-moment
-//  distribution consistent with known F-35A external dimensions.
+//  From JSBSim `aircraft/f16/f16.xml` <mass_balance> block
+//  (negated_crossproduct_inertia = true, so stored ixz = −982 → actual Ixz = +982):
+//    Empty weight:   17,400 lb
+//    Pilot:             230 lb
+//    Internal fuel:   3,000 lb  (2 × 1,500 lb tanks, ~50 % load)
+//  → Operating weight = 20,630 lb → mass ≈ 641 slug
 
-/// Operating mass (slug).  38 750 lbf / 32.174 ft/s² ≈ 1 204 slug.
-pub const MASS: f64 = 38_750.0 / crate::atmo::G0;
+/// Operating mass (slug).  20 630 lbf / 32.174 ft/s² ≈ 641 slug.
+pub const MASS: f64 = 20_630.0 / crate::atmo::G0;
 
-/// Roll inertia (slug·ft²).
-pub const IXX: f64 = 34_000.0;
-/// Pitch inertia (slug·ft²).
-pub const IYY: f64 = 128_000.0;
-/// Yaw inertia (slug·ft²).
-pub const IZZ: f64 = 140_000.0;
-/// Inertia cross-product (slug·ft²).
-pub const IXZ: f64 = 1_800.0;
+/// Roll inertia (slug·ft²).  Source: F-16 JSBSim XML.
+pub const IXX: f64 = 9_496.0;
+/// Pitch inertia (slug·ft²).  Source: F-16 JSBSim XML.
+pub const IYY: f64 = 55_814.0;
+/// Yaw inertia (slug·ft²).  Source: F-16 JSBSim XML.
+pub const IZZ: f64 = 63_100.0;
+/// Inertia cross-product Ixz (slug·ft²).  Stored as −982 with negated flag → +982.
+pub const IXZ: f64 = 982.0;
 
-/// F-35A mass properties (pre-computed once).
+/// F-16A mass properties (pre-computed once).
 pub const F35_MASS_PROPS: MassProps = MassProps::new(
     MASS, IXX, IYY, IZZ, IXZ,
 );
 
 // ── Control surface limits ────────────────────────────────────────────────────
 
-/// Elevon pitch authority: ±25°.
+/// Horizontal tail (elevator) authority: ±25°  (±0.436 rad — JSBSim table range).
 const ELEV_MAX_DEG: f64 = 25.0;
-/// Differential elevon (roll) authority: ±20°.
-const AIL_MAX_DEG: f64 = 20.0;
+/// Aileron authority: ±21.5° (F-16 FCS limit).
+const AIL_MAX_DEG:  f64 = 21.5;
 /// Rudder authority: ±30°.
-const RUD_MAX_DEG: f64 = 30.0;
+const RUD_MAX_DEG:  f64 = 30.0;
 
 // ── Controls ──────────────────────────────────────────────────────────────────
 
-/// Normalised pilot controls for the F-35A.
+/// Normalised pilot controls for the F-16A.
 #[derive(Debug, Clone, Copy)]
 pub struct Controls {
     /// Throttle [0, 1].  0.83 = military power; 1.0 = max afterburner.
@@ -115,7 +114,7 @@ struct Surfaces {
 
 // ── FlightModel ───────────────────────────────────────────────────────────────
 
-/// Top-level F-35A flight model.
+/// Top-level F-16A flight model (aerodynamic data from JSBSim F-16 model).
 pub struct FlightModel {
     /// Current 12-DoF state.
     pub state: State,
@@ -213,8 +212,8 @@ fn make_aero_in(
 // ── Level-flight trim ─────────────────────────────────────────────────────────
 
 /// Approximate trim for straight-and-level flight.
-/// Uses the CL table to find the angle of attack that balances lift against
-/// the F-35A operating weight.
+/// Uses the de=0 CL table to find the angle of attack that balances lift
+/// against the F-16A operating weight.
 fn trim_level_flight(altitude_ft: f64, airspeed_fps: f64, heading_rad: f64)
     -> State
 {
@@ -239,7 +238,7 @@ fn trim_level_flight(altitude_ft: f64, airspeed_fps: f64, heading_rad: f64)
         CL_ALPHA_TABLE.first().unwrap().1,
         CL_ALPHA_TABLE.last() .unwrap().1,
     );
-    let alpha = interp1(&cl_alpha_inv, cl_clamped).clamp(-0.26, 0.50);
+    let alpha = interp1(&cl_alpha_inv, cl_clamped).clamp(-0.175, 0.524);
 
     let theta = alpha; // level flight: climb angle = 0 → θ = α
     let u = vt * theta.cos();
