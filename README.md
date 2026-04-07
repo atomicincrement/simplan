@@ -13,6 +13,28 @@ Features:
 
 ---
 
+## Installation
+
+### Pre-built binaries
+
+Download the latest release for your platform from the [GitHub Releases](https://github.com/atomicincrement/simplan/releases) page, extract the archive, and run the `simplan` binary inside it. No other dependencies are required.
+
+### Building from source
+
+**Prerequisites:** [Rust stable](https://rustup.rs/) (1.85+). Linux users also need a few system libraries — see [Installing Rust](#installing-rust) below for the exact packages.
+
+```bash
+git clone https://github.com/atomicincrement/simplan.git
+cd simplan
+cargo run --release        # optimised build
+# or, for a faster debug build with hot-reload:
+cargo run --features dev
+```
+
+The first build downloads and compiles all dependencies (~5 min). Subsequent incremental builds are much faster.
+
+---
+
 ## Installing Rust
 
 ### Linux
@@ -94,21 +116,17 @@ git clone https://github.com/atomicincrement/simplan.git
 cd simplan
 ```
 
-Run the simulator:
-
-```bash
-cargo run
-```
-
-The first build will take a few minutes while dependencies compile. Subsequent builds are much faster because the workspace is configured with `opt-level = 1` for your own code and `opt-level = 3` for dependencies.
-
-To run in release mode (best performance):
+Run the simulator in release mode:
 
 ```bash
 cargo run --release
 ```
 
-> **Note:** the debug build uses Bevy's `dynamic_linking` feature to speed up incremental recompiles during development. This is disabled automatically in `--release`.
+For faster incremental rebuilds during development (enables Bevy's dynamic linking):
+
+```bash
+cargo run --features dev
+```
 
 ### FDM reference simulation
 

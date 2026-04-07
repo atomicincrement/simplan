@@ -146,3 +146,15 @@ Wire-up in `crates/sim`:
 - Both new systems registered in `TerrainPlugin`.
 - Build clean (zero warnings).
 
+
+## 2026-04-07
+
+**User:** Set up the CI to build releases for Linux, Mac and Windows.
+
+**Action:**
+- Created `.github/workflows/release.yml`:
+  - Triggers on pushed version tags (`v*`) and manual `workflow_dispatch`.
+  - Matrix of four targets: `x86_64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`.
+  - Each job installs the required Rust target, caches the Cargo registry and `target/`, installs Linux system deps (`libasound2-dev libudev-dev libxkbcommon-dev pkg-config`), builds the `simplan` package in `--release` mode, stages the binary + `assets/` + `README.md`, and produces a `.tar.gz` (Unix) or `.zip` (Windows) artifact.
+  - A dependent `release` job downloads all artifacts and publishes a GitHub Release with auto-generated notes via `softprops/action-gh-release`.
+- Moved `bevy/dynamic_linking` out of the hard `[dependencies]` features list in `crates/sim/Cargo.toml` and into an optional `dev` Cargo feature so release builds are statically linked. Local development: `cargo run --features dev`.

@@ -1,0 +1,132 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: simplan
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            libudev-dev \
+            libxkbcommon-dev \
+            pkg-config
+
+      - name: Build release binary
+        run: >
+          cargo build
+          --release
+          --package simplan
+          --target ${{ matrix.target }}
+
+      - name: Prepare staging directory (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          STAGE=stage/${{ env.BINARY_NAME }}-${{ matrix.target }}
+          mkdir -p "$STAGE"
+          cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} "$STAGE/"
+          cp -r assets "$STAGE/"
+          cp README.md "$STAGE/"
+
+      - name: Prepare staging directory (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $STAGE = "stage\${{ env.BINARY_NAME }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path $STAGE | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\${{ env.BINARY_NAME }}.exe" $STAGE
+          Copy-Item -Recurse assets $STAGE
+          Copy-Item README.md $STAGE
+
+      - name: Create archive (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          ARCHIVE=${{ env.BINARY_NAME }}-${{ matrix.target }}.tar.gz
+          tar -czf "$ARCHIVE" -C stage ${{ env.BINARY_NAME }}-${{ matrix.target }}
+          echo "ASSET=$ARCHIVE" >> $GITHUB_ENV
+
+      - name: Create archive (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $ARCHIVE = "${{ env.BINARY_NAME }}-${{ matrix.target }}.zip"
+          Compress-Archive `
+            -Path "stage\${{ env.BINARY_NAME }}-${{ matrix.target }}" `
+            -DestinationPath $ARCHIVE
+          "ASSET=$ARCHIVE" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY_NAME }}-${{ matrix.target }}
+          path: ${{ env.ASSET }}
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
