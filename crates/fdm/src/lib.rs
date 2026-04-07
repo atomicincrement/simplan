@@ -9,7 +9,7 @@
 //!
 //! Per-aircraft:
 //! - [`c172`]  – Cessna 172p (JSBSim port)
-//! - [`f35`]   – F-35A Lightning II (estimated coefficients)
+//! - [`f16`]   – F-16A Fighting Falcon (JSBSim data, Nguyen NASA TM-1979)
 
 // ── Shared modules ────────────────────────────────────────────────────────────
 pub mod atmo;
@@ -18,4 +18,4 @@ pub mod math;
 
 // ── Aircraft modules ──────────────────────────────────────────────────────────
 pub mod c172;
-pub mod f35;
+pub mod f16;

@@ -5,7 +5,7 @@
 A 3-D flight simulator built with [Bevy](https://bevyengine.org/) (v0.15) and a custom flight-dynamics model (FDM) based on the JSBSim equations of motion.
 
 Features:
-- F-35A aerodynamics and F135 engine thrust model
+- F-16A aerodynamics (JSBSim data, Nguyen NASA TM-1979) and F100-PW-229 engine thrust model
 - Avian physics integration (rigid-body dynamics, half-space ground collider)
 - Follow camera, checkerboard terrain, mountain landmark
 - HUD: compass, altimeter, airspeed (knots), throttle bar, stick indicator
@@ -162,7 +162,7 @@ simplan/
 │       ├── src/
 │       │   ├── atmo.rs         # ISA atmosphere model
 │       │   ├── eom.rs          # equations of motion (RK4)
-│       │   ├── f35/
+│       │   ├── f16/
 │       │   │   ├── aero.rs     # aerodynamic coefficients
 │       │   │   ├── prop.rs     # F135 engine thrust
 │       │   │   └── mod.rs      # FlightModel wrapper

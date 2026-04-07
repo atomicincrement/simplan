@@ -3,8 +3,8 @@ use bevy::input::gamepad::{Gamepad, GamepadAxis, GamepadButton};
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use fdm::atmo::atmosphere;
-use fdm::f35::aero::{aerodynamics, AeroIn};
-use fdm::f35::prop::propulsion;
+use fdm::f16::aero::{aerodynamics, AeroIn};
+use fdm::f16::prop::propulsion;
 use fdm::math::Vec3 as FdmVec3;
 use geodata::GeoCache;
 use terrain::{TerrainConfig, TerrainPlugin};
@@ -378,7 +378,7 @@ fn draw_rect(buf: &mut [u8], w: u32, h: u32, x: i32, y: i32, rw: i32, rh: i32, c
     }
 }
 
-// ── F-35–like aircraft built from primitive shapes ───────────────────────────
+// ── F-16A Fighting Falcon built from primitive shapes ──────────────────────────
 //
 //  Coordinate convention (aircraft body frame):
 //    +Z  = aft  (tail direction from nose)
@@ -441,8 +441,8 @@ fn spawn_aircraft(
         };
     }
 
-    // Bounding box that broadly covers the F-35 model:
-    //   wingspan ≈ 11 m  |  height ≈ 3.5 m  |  length ≈ 11 m
+    // Bounding box that broadly covers the F-16A model:
+    //   wingspan ≈ 9.1 m  |  height ≈ 3.1 m  |  length ≈ 15 m
     commands
         .spawn((
             Transform::from_translation(position)
@@ -451,8 +451,8 @@ fn spawn_aircraft(
             Aircraft,
             RigidBody::Dynamic,
             Collider::cuboid(11.0, 3.5, 11.0),
-            // F-35A combat-weight mass: 38 750 lbf / 32.174 ft/s² ≈ 17 576 kg
-            Mass(17_576.0_f32),
+            // F-16A operating weight: 20 630 lbf / 32.174 ft/s² × 14.594 kg/slug ≈ 9 354 kg
+            Mass(9_354.0_f32),
             LinearVelocity(Vec3::new(0.0, 0.0, 100.0)), // heading south (+Z)
             ExternalForce::default().with_persistence(false),
             ExternalTorque::default().with_persistence(false),
